@@ -348,35 +348,58 @@ HICON MakeTrayIcon(int level) {
     auto* px = static_cast<uint32_t*>(bits);
     for (int i = 0; i < sz * sz; ++i) px[i] = 0;  // 全透明
 
-    auto put = [&](int x, int y, uint8_t r, uint8_t gg, uint8_t b, uint8_t a) {
+    auto put = [&](int x, int y, uint8_t r, uint8_t gr, uint8_t b, uint8_t a) {
         if (x < 0 || y < 0 || x >= sz || y >= sz) return;
-        uint32_t& d = px[y * sz + x];
-        d = (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(r) << 16) |
-            (static_cast<uint32_t>(gg) << 8) | b;
+        px[y * sz + x] = (static_cast<uint32_t>(a) << 24) | (static_cast<uint32_t>(r) << 16) |
+                         (static_cast<uint32_t>(gr) << 8) | b;
     };
 
-    // 设备剪影：圆角方块
-    for (int y = 5; y < 27; ++y) {
-        for (int x = 4; x < 24; ++x) {
-            int cx = (x < 8) ? 8 : (x > 19 ? 19 : x);
-            int cy = (y < 9) ? 9 : (y > 22 ? 22 : y);
-            int dx = x - cx;
-            int dy = y - cy;
-            if (dx * dx + dy * dy <= 12) put(x, y, 0xE6, 0xE8, 0xEB, 0xFF);
+    // 1) 深灰圆角底板
+    for (int y = 1; y <= 30; ++y) {
+        for (int x = 1; x <= 30; ++x) {
+            const int ex = (x < 8) ? (8 - x) : (x > 23 ? (x - 23) : 0);
+            const int ey = (y < 8) ? (8 - y) : (y > 23 ? (y - 23) : 0);
+            if (ex * ex + ey * ey > 40) continue;
+            put(x, y, 0x3A, 0x3A, 0x3D, 0xFF);
         }
     }
 
-    D2D1_COLOR_F c = BatteryColor(level);
-    uint8_t cr = static_cast<uint8_t>(c.r * 255);
-    uint8_t cg = static_cast<uint8_t>(c.g * 255);
-    uint8_t cb = static_cast<uint8_t>(c.b * 255);
+    // 2) 电池内部先铺浅灰（表示容量）
+    for (int y = 9; y <= 20; ++y) {
+        for (int x = 7; x <= 19; ++x) put(x, y, 0x3A, 0x3A, 0x3D, 0xFF);
+    }
 
-    // 右下角电量圆点（5px）
-    for (int y = 0; y < sz; ++y) {
-        for (int x = 0; x < sz; ++x) {
-            int dx = x - 25;
-            int dy = y - 25;
-            if (dx * dx + dy * dy <= 30) put(x, y, cr, cg, cb, 0xFF);
+    // 3) 电量填充（浅灰，按比例从左侧起）
+    const int pct = (level < 0) ? 0 : (level > 100 ? 100 : level);
+    const int fillW = 13 * pct / 100;
+    for (int y = 9; y <= 20; ++y) {
+        for (int x = 7; x < 7 + fillW && x <= 19; ++x) {
+            put(x, y, 0xC9, 0xCC, 0xD0, 0xFF);
+        }
+    }
+
+    // 4) 电池外壳：1px 白色描边 + 正极凸起
+    for (int y = 8; y <= 21; ++y) {
+        for (int x = 6; x <= 20; ++x) {
+            const bool edge = (x == 6 || x == 20 || y == 8 || y == 21);
+            if (edge) put(x, y, 0xF0, 0xF2, 0xF4, 0xFF);
+        }
+    }
+    for (int y = 12; y <= 17; ++y) {
+        for (int x = 21; x <= 23; ++x) put(x, y, 0xF0, 0xF2, 0xF4, 0xFF);
+    }
+
+    // 5) 右下角状态点
+    uint8_t dr = 0x5C, dg = 0xA8, db = 0x34;      // 绿
+    if (level >= 0 && level < 20) { dr = 0xE2; dg = 0x4B; db = 0x4A; }
+    else if (level >= 0 && level < 50) { dr = 0xEF; dg = 0x9F; db = 0x27; }
+    const int ccx = 23, ccy = 23;
+    const float cr = 6.0f;
+    for (int y = 16; y <= 30; ++y) {
+        for (int x = 16; x <= 30; ++x) {
+            const float dx = static_cast<float>(x - ccx);
+            const float dy = static_cast<float>(y - ccy);
+            if (dx * dx + dy * dy <= cr * cr) put(x, y, dr, dg, db, 0xFF);
         }
     }
 
@@ -386,11 +409,12 @@ HICON MakeTrayIcon(int level) {
     HBITMAP mask = CreateBitmap(sz, sz, 1, 1, nullptr);
     ICONINFO ii{};
     ii.fIcon = TRUE;
-    ii.hbmMask = mask;
     ii.hbmColor = color;
+    ii.hbmMask = mask;
     HICON icon = CreateIconIndirect(&ii);
-    DeleteObject(mask);
+
     DeleteObject(color);
+    DeleteObject(mask);
     return icon;
 }
 
@@ -964,8 +988,8 @@ void ShowPanel() {
 }
 
 void HidePanel() {
-    // 最小化而非隐藏：任务栏按钮才存在，电量角标才看得见
-    ShowWindow(g.panel, SW_MINIMIZE);
+    // 真正隐藏：任务栏不留窗口按钮，电量由托盘图标表达
+    ShowWindow(g.panel, SW_HIDE);
     g.panelVisible = false;
 }
 
