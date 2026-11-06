@@ -366,6 +366,96 @@ bool VerifyConfigBlock(HANDLE h, const std::vector<BYTE>& expected) {
 
 }  // namespace
 
+// ---------- 键盘灯效 ----------
+
+namespace {
+
+bool KbReadLedBlock(HANDLE h, BYTE* led) {
+    std::vector<BYTE> f(33, 0);
+    f[0] = 0x00;
+    f[1] = 0xAA;
+    f[2] = 19;   // cmd
+    f[3] = 16;   // len
+    if (!OverlappedWrite(h, f)) return false;
+    Sleep(70);
+
+    std::vector<BYTE> resp;
+    if (!OverlappedRead(h, 33, 800, &resp) || resp.size() < 9 + 13) return false;
+    for (int i = 0; i < 16; ++i) led[i] = resp[9 + i];
+    return true;
+}
+
+bool KbWriteLedBlock(HANDLE h, const BYTE* led) {
+    std::vector<BYTE> f(33, 0);
+    f[0] = 0x00;   // ReportID
+    f[1] = 0xAA;   // 帧头
+    f[2] = 35;     // cmd
+    f[3] = 16;     // len
+    // 数据从 payload[8] 开始 → frame[9]
+    for (int i = 0; i < 16; ++i) f[9 + i] = led[i];
+    if (!OverlappedWrite(h, f)) return false;
+    Sleep(60);
+    return true;
+}
+
+}  // namespace
+
+KeyboardLed ReadKeyboardLed() {
+    KeyboardLed k;
+    Iface it;
+    if (!FindIface(kKbVid, kKbPid, kKbPage, kKbUsage, &it)) return k;
+
+    HANDLE h = CreateFileW(it.path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return k;
+
+    BYTE led[16] = {};
+    if (KbReadLedBlock(h, led)) {
+        k.ok = true;
+        k.mode = led[0];
+        k.r = led[1];
+        k.g = led[2];
+        k.b = led[3];
+        k.colorMode = led[8];
+        k.brightness = led[9];
+        k.speed = led[10];
+    }
+    CloseHandle(h);
+    return k;
+}
+
+bool WriteKeyboardLed(int brightness, int speed) {
+    Iface it;
+    if (!FindIface(kKbVid, kKbPid, kKbPage, kKbUsage, &it)) return false;
+
+    HANDLE h = CreateFileW(it.path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    BYTE led[16] = {};
+    if (!KbReadLedBlock(h, led)) {   // 写前必读，拿到其它字段原值
+        CloseHandle(h);
+        return false;
+    }
+
+    led[4] = 255;
+    led[9] = static_cast<BYTE>(brightness & 0xFF);
+    led[10] = static_cast<BYTE>(speed & 0xFF);
+    led[14] = 0xAA;
+    led[15] = 0x55;
+
+    bool ok = KbWriteLedBlock(h, led);
+    if (ok) {
+        Sleep(200);
+        BYTE check[16] = {};
+        ok = KbReadLedBlock(h, check) && check[9] == led[9];
+    }
+    CloseHandle(h);
+    return ok;
+}
+
 std::wstring MouseBackupPath(const std::wstring& configDir) {
     return configDir + L"\\backup.mouse.bin";
 }

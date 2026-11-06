@@ -107,6 +107,7 @@ struct AppState {
     bool kbConnected = false;
     DeviceReading reading;
     MouseConfig mouseCfg;
+    KeyboardLed kbLed;
     HANDLE devThread = nullptr;
     HANDLE wakeEvent = nullptr;
     HANDLE stopEvent = nullptr;
@@ -561,6 +562,8 @@ struct Wheel {
 
 Wheel g_dpiWheel;
 Wheel g_rateWheel;
+Wheel g_brightWheel;
+Wheel g_speedWheel;
 int g_dragWheel = -1;
 int g_dragStartY = 0;
 int g_dragStartSel = 0;
@@ -602,6 +605,15 @@ void DrawWheel(const Wheel& wh, const std::vector<std::wstring>& labels, const w
 void DrawBackButton() {
     FillRound(D2D1::RectF(S(24), S(16), S(56), S(48)), 8, kCard);
     DrawTextAt(L"←", g.fmtHead, D2D1::RectF(S(28), S(18), S(56), S(46)), kText);
+}
+
+Wheel* WheelById(int id) {
+    switch (id) {
+        case 0: return &g_dpiWheel;
+        case 1: return &g_rateWheel;
+        case 2: return &g_brightWheel;
+        default: return &g_speedWheel;
+    }
 }
 
 void SyncWheels() {
@@ -695,6 +707,26 @@ void OnPaintMouseDetail() {
                D2D1::RectF(S(24), S(300), S(736), S(320)), kTextDim);
 }
 
+void SyncKbWheels() {
+    g_brightWheel.x = 180.0f;
+    g_brightWheel.y = 108.0f;
+    g_brightWheel.w = 230.0f;
+    g_brightWheel.h = 160.0f;
+    g_brightWheel.count = 6;
+    g_brightWheel.selected = g.kbLed.ok ? g.kbLed.brightness : 0;
+    if (g_brightWheel.selected < 0) g_brightWheel.selected = 0;
+    if (g_brightWheel.selected > 5) g_brightWheel.selected = 5;
+
+    g_speedWheel.x = 430.0f;
+    g_speedWheel.y = 108.0f;
+    g_speedWheel.w = 230.0f;
+    g_speedWheel.h = 160.0f;
+    g_speedWheel.count = 6;
+    g_speedWheel.selected = g.kbLed.ok ? g.kbLed.speed : 0;
+    if (g_speedWheel.selected < 0) g_speedWheel.selected = 0;
+    if (g_speedWheel.selected > 5) g_speedWheel.selected = 5;
+}
+
 void OnPaintKbDetail() {
     DrawBackButton();
     DrawTextAt(L"键盘 · EWEADN X87", g.fmtHead,
@@ -715,21 +747,21 @@ void OnPaintKbDetail() {
     } else {
         wcscpy_s(val, L"--");
     }
-    DrawTextAt(val, g.fmtValue, D2D1::RectF(S(24), S(72), S(320), S(124)), kText);
-    DrawTextAt(g.kbConnected ? L"电量" : L"设备未响应", g.fmtSmall,
-               D2D1::RectF(S(24), S(126), S(320), S(144)), kTextDim);
+    DrawTextAt(val, g.fmtValue, D2D1::RectF(S(28), S(96), S(170), S(148)), kText);
+    DrawTextAt(L"电量", g.fmtSmall, D2D1::RectF(S(28), S(150), S(170), S(168)), kTextDim);
 
-    // 功能占位
-    const wchar_t* titles[] = {L"RGB 灯效", L"按键改键", L"回报率"};
-    const wchar_t* notes[] = {L"协议待逆向（P3）", L"需键位表（P4）", L"协议待逆向"};
-
-    for (int i = 0; i < 3; ++i) {
-        const float x = 24.0f + i * 244.0f;
-        FillRound(D2D1::RectF(S(x), S(168), S(x + 228), S(280)), 12, kCard);
-        DrawTextAt(titles[i], g.fmtTitle, D2D1::RectF(S(x + 18), S(186), S(x + 210), S(208)), kText);
-        DrawTextAt(notes[i], g.fmtSmall, D2D1::RectF(S(x + 18), S(210), S(x + 210), S(228)), kTextDim);
-        DrawTextAt(L"待开发", g.fmtSmall, D2D1::RectF(S(x + 18), S(244), S(x + 210), S(266)), kTextDim);
+    std::vector<std::wstring> labels;
+    for (int i = 0; i <= 5; ++i) {
+        wchar_t b[8];
+        swprintf_s(b, L"%d", i);
+        labels.emplace_back(b);
     }
+
+    DrawWheel(g_brightWheel, labels, L"亮度");
+    DrawWheel(g_speedWheel, labels, L"速度");
+
+    DrawTextAt(L"上下滚动调整　·　松开后自动应用　·　灯效模式与改键待开发", g.fmtSmall,
+               D2D1::RectF(S(28), S(294), S(736), S(314)), kTextDim);
 }
 
 void OnPaint() {
@@ -796,6 +828,7 @@ DWORD WINAPI DeviceThreadProc(LPVOID) {
     for (;;) {
         g.reading = ReadDevices();
         g.mouseCfg = ReadMouseConfig();
+        g.kbLed = ReadKeyboardLed();
         if (g.panel != nullptr) PostMessageW(g.panel, WM_DEVICE_UPDATE, 0, 0);
 
         // 60 秒周期；唤醒事件可提前触发，停止事件立即退出
@@ -911,8 +944,6 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
-            if (g_view != ViewMode::MouseDetail) return 0;
-
             // 命中滚轮：记录拖动起点，并直接定位到点击处最近的一档
             auto tryHit = [&](Wheel& w, int id) -> bool {
                 if (pt.x < static_cast<LONG>(S(w.x)) || pt.x > static_cast<LONG>(S(w.x + w.w))) return false;
@@ -932,15 +963,20 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
                 return true;
             };
-            if (tryHit(g_dpiWheel, 0)) return 0;
-            if (tryHit(g_rateWheel, 1)) return 0;
+            if (g_view == ViewMode::MouseDetail) {
+                if (tryHit(g_dpiWheel, 0)) return 0;
+                if (tryHit(g_rateWheel, 1)) return 0;
+            } else {
+                if (tryHit(g_brightWheel, 2)) return 0;
+                if (tryHit(g_speedWheel, 3)) return 0;
+            }
             return 0;
         }
 
         case WM_MOUSEMOVE:
             if (g_dragWheel >= 0) {
                 POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-                Wheel& w = (g_dragWheel == 0) ? g_dpiWheel : g_rateWheel;
+                Wheel& w = *WheelById(g_dragWheel);
                 int target = g_dragStartSel +
                              static_cast<int>(std::lround((g_dragStartY - pt.y) / S(34.0f)));
                 if (target < 0) target = 0;
@@ -959,7 +995,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_dragWheel >= 0) {
                 g_pendingWrite = g_dragWheel;
                 g_dragWheel = -1;
-                SetTimer(hwnd, 2, 400, nullptr);
+                SetTimer(hwnd, (g_pendingWrite >= 2) ? 3 : 2, 400, nullptr);
                 return 0;
             }
 
@@ -976,6 +1012,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         return 0;
                     }
                     if (pt.x >= static_cast<LONG>(S(386)) && pt.x <= static_cast<LONG>(S(736))) {
+                        SyncKbWheels();
                         g_view = ViewMode::KbDetail;
                         InvalidateRect(hwnd, nullptr, FALSE);
                         return 0;
@@ -993,7 +1030,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_MOUSEWHEEL: {
-            if (g_view != ViewMode::MouseDetail) return 0;
+            if (g_view == ViewMode::Main) return 0;
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
             const int step = (GET_WHEEL_DELTA_WPARAM(wp) > 0) ? -1 : 1;
@@ -1012,6 +1049,18 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                        pt.y <= static_cast<LONG>(S(g_rateWheel.y + g_rateWheel.h))) {
                 w = &g_rateWheel;
                 which = 1;
+            } else if (pt.x >= static_cast<LONG>(S(g_brightWheel.x)) &&
+                       pt.x <= static_cast<LONG>(S(g_brightWheel.x + g_brightWheel.w)) &&
+                       pt.y >= static_cast<LONG>(S(g_brightWheel.y)) &&
+                       pt.y <= static_cast<LONG>(S(g_brightWheel.y + g_brightWheel.h))) {
+                w = &g_brightWheel;
+                which = 2;
+            } else if (pt.x >= static_cast<LONG>(S(g_speedWheel.x)) &&
+                       pt.x <= static_cast<LONG>(S(g_speedWheel.x + g_speedWheel.w)) &&
+                       pt.y >= static_cast<LONG>(S(g_speedWheel.y)) &&
+                       pt.y <= static_cast<LONG>(S(g_speedWheel.y + g_speedWheel.h))) {
+                w = &g_speedWheel;
+                which = 3;
             }
             if (w == nullptr) return 0;
 
@@ -1021,7 +1070,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (w->selected != target) {
                 w->selected = target;
                 g_pendingWrite = which;
-                SetTimer(hwnd, 2, 400, nullptr);
+                SetTimer(hwnd, (which >= 2) ? 3 : 2, 400, nullptr);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -1050,6 +1099,16 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     MessageBoxW(hwnd, which == 0 ? L"切换 DPI 失败，已回滚。"
                                                 : L"切换回报率失败，已回滚。",
                                 kAppTitle, MB_OK | MB_ICONWARNING);
+                }
+            } else if (wp == 3) {
+                KillTimer(hwnd, 3);
+                g_pendingWrite = -1;
+                if (WriteKeyboardLed(g_brightWheel.selected, g_speedWheel.selected)) {
+                    if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
+                } else {
+                    SyncKbWheels();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    MessageBoxW(hwnd, L"调整灯效失败，已回滚。", kAppTitle, MB_OK | MB_ICONWARNING);
                 }
             }
             return 0;
@@ -1086,6 +1145,14 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const int rt = g.mouseCfg.rateIndex;
                 if (rt >= 0 && rt < g_rateWheel.count && rt != g_rateWheel.selected) {
                     g_rateWheel.selected = rt;
+                }
+            } else if (g_view == ViewMode::KbDetail && g_dragWheel < 0 && g_pendingWrite < 0 &&
+                       g.kbLed.ok) {
+                if (g.kbLed.brightness >= 0 && g.kbLed.brightness <= 5) {
+                    g_brightWheel.selected = g.kbLed.brightness;
+                }
+                if (g.kbLed.speed >= 0 && g.kbLed.speed <= 5) {
+                    g_speedWheel.selected = g.kbLed.speed;
                 }
             }
 

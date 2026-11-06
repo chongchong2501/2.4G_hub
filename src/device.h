@@ -42,6 +42,20 @@ DeviceReading ReadDevices();
 // 读取鼠标整包配置；通道卡死时自动用 0x11 0x58 恢复一次
 MouseConfig ReadMouseConfig();
 
+// 键盘灯效（cmd 19 读 / cmd 35 写，16 字节）
+struct KeyboardLed {
+    bool ok = false;
+    int mode = 0;
+    int r = 0, g = 0, b = 0;
+    int colorMode = 0;
+    int brightness = 0;
+    int speed = 0;
+};
+KeyboardLed ReadKeyboardLed();
+
+// 只改亮度与速度，其余字段原样保留；写完回读确认
+bool WriteKeyboardLed(int brightness, int speed);
+
 // ---------- 配置备份与恢复（FR-T4） ----------
 
 // 读取原始整包（63 字节，反码后）。读失败返回 false——此时禁止任何写操作。
