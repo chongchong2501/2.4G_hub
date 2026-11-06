@@ -1,1 +1,108 @@
-# 2.4G_hub
+# MCHOSE A7 Pro + EWEADN X87 Hub
+
+一个常驻系统托盘的 Windows 键鼠管理工具，同时管理 **迈从 A7 Pro 无线鼠标** 与 **前行者 X87 三模机械键盘**，用来替代厂商的网页驱动。
+
+**零第三方依赖**：只用 Windows SDK（`hid.dll` / `SetupAPI` / `Direct2D` / `DirectWrite`），编译产物是单个 exe，不需要安装、不需要管理员权限、不需要 VC++ 运行库。
+
+> 本项目为非官方实现。协议来自公开的开源逆向文档与对本机设备的实测，仅用于个人设备管理，不涉及固件修改。
+
+---
+
+## 支持的设备
+
+| 设备 | 标识 | 协议 | 状态 |
+|---|---|---|---|
+| MCHOSE A7 Pro（鼠标） | `0x5253:0x1021` | feature report，`0x11`(20B) / `0x12`(64B)，载荷整体 `^0xFF` | ✅ 已验证 |
+| EWEADN X87（键盘） | 接收器 `0x0C45:0xFEFE`，本体 `0x8006` | Sonix 私有协议，`0xFF60/0x61`，32 字节帧 | ✅ 电量已验证，其余待做 |
+
+键盘**不是** Evision 公版平台（`0x320F`），也**不是** QMK/VIA，这两条路径都已被实机排除。
+
+---
+
+## 当前进度
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P0 | 枚举与协议验证 | ✅ 双设备电量读取实机通过 |
+| P1 | 托盘骨架（单实例、托盘、无边框面板、便携配置、自启、退出序列、高 DPI） | ✅ |
+| P2 | 设备层（60 s 轮询、唤醒重读、空响应重试、休眠/未插入区分） | ✅ |
+| P2 | DPI / 回报率读取与切换（含备份与回滚） | ✅ |
+| P2 | 改键、Y 轴独立 DPI | ⬜ 待做 |
+| P3–P5 | 键盘灯效、键盘改键、完整调试版 | ⬜ 待做 |
+
+---
+
+## 已实现的功能
+
+- **电量**：鼠标与键盘的实时电量、充电状态，托盘图标右下角有电量色点（双设备取较低值）
+- **连接状态**：区分「未插入」「休眠中」「已连接」，休眠时提示敲键唤醒
+- **DPI**：读取六档数值与当前档位，点击配置行即可切换（`0x11 0x40`）
+- **回报率**：读取与切换（`0x11 0x41`），保留有线侧原值不动
+- **配置备份**：首次写入前自动保存 `config\backup.mouse.bin`，可一键还原
+- **便携模式**：配置写在 exe 同目录 `config\`，目录只读时自动降级到 `%LOCALAPPDATA%`
+- **开机自启**：写 `HKCU\...\Run`，exe 移动后自动校正路径
+- **低占用**：消息驱动，空闲 CPU 实测 0.00%
+
+---
+
+## 构建
+
+需要 Visual Studio 的 C++ 工具链与 Windows SDK（已在 VS 2022 + SDK 10.0.26100 上验证）。
+
+在 **x64 Native Tools Command Prompt** 中：
+
+```bat
+cl /std:c++17 /utf-8 /EHsc /MT /O2 /W4 /DUNICODE /D_UNICODE ^
+   src\hub.cpp src\device.cpp ^
+   /Fe:bin\MchoseEweadnHub.exe ^
+   /link user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib ^
+   dwmapi.lib d2d1.lib dwrite.lib setupapi.lib hid.lib ^
+   /MANIFEST:EMBED /MANIFESTINPUT:src\hub.manifest
+```
+
+`/MT` 必须保留——用 `/MD` 会依赖 VC++ 运行库，就不是"单 exe 绿色版"了。
+`/utf-8` 与 `hub.manifest` 也不能省：前者保证中文字符串正确，后者声明 Per-Monitor V2 DPI，否则界面会被系统按 96 DPI 虚拟化。
+
+---
+
+## 诊断工具
+
+`src/` 下的独立工具用于协议验证，可单独编译：
+
+| 工具 | 用途 |
+|---|---|
+| `hid_probe.cpp` | 枚举本机 HID 设备、usage page、report ID 与报文长度 |
+| `mouse_probe.cpp` | 读取鼠标电量（`0x11 0x06`） |
+| `mouse_packet.cpp` | 读取并解析鼠标整包配置（`0x12 0x67`），含通道卡死自动恢复 |
+| `mouse_backup_test.cpp` | 验证「备份 → 写入 → 回读 → 恢复」链路 |
+| `mouse_restore.cpp` | 从备份整包还原 |
+| `kb_probe.cpp` / `kb_info.cpp` / `kb_read.cpp` | 键盘通道探测、设备信息帧试探、电量读取 |
+| `rawkbd.cpp` | 用 Raw Input 判定按键来源设备（键盘 HID 集合被系统独占时的替代方案） |
+
+---
+
+## 目录结构
+
+```
+src/    源码与诊断工具
+docs/   协议笔记、各阶段能力表、界面截图
+bin/    构建输出（不纳入版本库）
+```
+
+`docs/MCHOSE-协议参考.md` 是对公开协议文档的本地留档，便于离线查阅字段偏移。
+
+---
+
+## 已知限制
+
+- 键盘侧只完成了电量，灯效与改键需要继续逆向
+- `0x12 0x67` 长报告通道会偶发卡死（返回全 0），需用 `0x11 0x58` 重选 profile 恢复
+- 写入前必须先成功读取整包，否则会把空数据当成原值写回设备
+
+这些坑的细节都记录在 `docs/` 与根目录的需求文档里。
+
+---
+
+## License
+
+[Apache-2.0](LICENSE)
