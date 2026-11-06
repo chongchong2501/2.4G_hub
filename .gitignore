@@ -1,0 +1,26 @@
+# 构建产物
+bin/*.exe
+bin/*.pdb
+bin/*.ilk
+bin/*.obj
+
+# 个人配置与设备备份（含用户本机数据，不入库）
+bin/config/
+
+# 内部工作数据
+.workbuddy/
+
+# 编译中间文件
+build/
+obj/
+*.obj
+*.pdb
+
+# 编辑器
+.vs/
+.vscode/
+*.user
+
+# 系统
+Thumbs.db
+desktop.ini
