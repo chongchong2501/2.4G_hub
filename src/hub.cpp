@@ -323,7 +323,8 @@ D2D1_COLOR_F BatteryColor(int level) {
     return kBad;
 }
 
-HICON MakeTrayIcon(int level) {
+// 双环托盘图标：外环 = 键盘电量，内环 = 鼠标电量
+HICON MakeTrayIcon(int mouseLevel, int kbLevel) {
     const int sz = 32;
     BITMAPV5HEADER bi{};
     bi.bV5Size = sizeof(bi);
@@ -354,52 +355,45 @@ HICON MakeTrayIcon(int level) {
                          (static_cast<uint32_t>(gr) << 8) | b;
     };
 
-    // 1) 深灰圆角底板
-    for (int y = 1; y <= 30; ++y) {
-        for (int x = 1; x <= 30; ++x) {
-            const int ex = (x < 8) ? (8 - x) : (x > 23 ? (x - 23) : 0);
-            const int ey = (y < 8) ? (8 - y) : (y > 23 ? (y - 23) : 0);
-            if (ex * ex + ey * ey > 40) continue;
-            put(x, y, 0x3A, 0x3A, 0x3D, 0xFF);
-        }
-    }
+    // 电量 → 颜色
+    auto colorFor = [](int level, uint8_t* r, uint8_t* g2, uint8_t* b) {
+        if (level < 0) { *r = 0x55; *g2 = 0x57; *b = 0x5B; return; }        // 离线：灰
+        if (level < 20) { *r = 0xE2; *g2 = 0x4B; *b = 0x4A; return; }       // 低：红
+        if (level < 50) { *r = 0xEF; *g2 = 0x9F; *b = 0x27; return; }       // 中：黄
+        *r = 0x5C; *g2 = 0xA8; *b = 0x34;                                    // 高：绿
+    };
 
-    // 2) 电池内部先铺浅灰（表示容量）
-    for (int y = 9; y <= 20; ++y) {
-        for (int x = 7; x <= 19; ++x) put(x, y, 0x3A, 0x3A, 0x3D, 0xFF);
-    }
+    uint8_t mr, mg, mb, kr, kg, kb;
+    colorFor(mouseLevel, &mr, &mg, &mb);
+    colorFor(kbLevel, &kr, &kg, &kb);
 
-    // 3) 电量填充（浅灰，按比例从左侧起）
-    const int pct = (level < 0) ? 0 : (level > 100 ? 100 : level);
-    const int fillW = 13 * pct / 100;
-    for (int y = 9; y <= 20; ++y) {
-        for (int x = 7; x < 7 + fillW && x <= 19; ++x) {
-            put(x, y, 0xC9, 0xCC, 0xD0, 0xFF);
-        }
-    }
+    const int mousePct = (mouseLevel < 0) ? 0 : (mouseLevel > 100 ? 100 : mouseLevel);
+    const int kbPct = (kbLevel < 0) ? 0 : (kbLevel > 100 ? 100 : kbLevel);
 
-    // 4) 电池外壳：1px 白色描边 + 正极凸起
-    for (int y = 8; y <= 21; ++y) {
-        for (int x = 6; x <= 20; ++x) {
-            const bool edge = (x == 6 || x == 20 || y == 8 || y == 21);
-            if (edge) put(x, y, 0xF0, 0xF2, 0xF4, 0xFF);
-        }
-    }
-    for (int y = 12; y <= 17; ++y) {
-        for (int x = 21; x <= 23; ++x) put(x, y, 0xF0, 0xF2, 0xF4, 0xFF);
-    }
+    const float cx = 15.5f, cy = 15.5f;
+    const float kTwoPi = 6.28318531f;
+    const float rOut = 13.5f, thOut = 3.6f;   // 外环（键盘）
+    const float rIn = 7.5f, thIn = 3.6f;      // 内环（鼠标）
+    const uint8_t dimR = 0x3F, dimG = 0x41, dimB = 0x45;  // 未填充的暗灰
 
-    // 5) 右下角状态点
-    uint8_t dr = 0x5C, dg = 0xA8, db = 0x34;      // 绿
-    if (level >= 0 && level < 20) { dr = 0xE2; dg = 0x4B; db = 0x4A; }
-    else if (level >= 0 && level < 50) { dr = 0xEF; dg = 0x9F; db = 0x27; }
-    const int ccx = 23, ccy = 23;
-    const float cr = 6.0f;
-    for (int y = 16; y <= 30; ++y) {
-        for (int x = 16; x <= 30; ++x) {
-            const float dx = static_cast<float>(x - ccx);
-            const float dy = static_cast<float>(y - ccy);
-            if (dx * dx + dy * dy <= cr * cr) put(x, y, dr, dg, db, 0xFF);
+    for (int y = 0; y < sz; ++y) {
+        for (int x = 0; x < sz; ++x) {
+            const float dx = x - cx;
+            const float dy = y - cy;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+
+            // 角度：12 点方向为 0，顺时针增长
+            float ang = std::atan2(dx, -dy);
+            if (ang < 0.0f) ang += kTwoPi;
+            const float frac = ang / kTwoPi;
+
+            if (dist >= rOut - thOut * 0.5f && dist <= rOut + thOut * 0.5f) {
+                if (frac <= kbPct / 100.0f) put(x, y, kr, kg, kb, 0xFF);
+                else put(x, y, dimR, dimG, dimB, 0xFF);
+            } else if (dist >= rIn - thIn * 0.5f && dist <= rIn + thIn * 0.5f) {
+                if (frac <= mousePct / 100.0f) put(x, y, mr, mg, mb, 0xFF);
+                else put(x, y, dimR, dimG, dimB, 0xFF);
+            }
         }
     }
 
@@ -522,9 +516,9 @@ void UpdateTaskbar() {
 
 void UpdateTrayIcon() {
     HICON old = g.trayIcon;
-    int level = g.mouseBattery;
-    if (g.kbBattery >= 0 && (level < 0 || g.kbBattery < level)) level = g.kbBattery;
-    g.trayIcon = MakeTrayIcon(level);
+    const int mouseLevel = g.mouseConnected ? g.mouseBattery : -1;
+    const int kbLevel = g.kbConnected ? g.kbBattery : -1;
+    g.trayIcon = MakeTrayIcon(mouseLevel, kbLevel);
 
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
@@ -548,7 +542,7 @@ void UpdateTrayIcon() {
 }
 
 void AddTrayIcon() {
-    if (g.trayIcon == nullptr) g.trayIcon = MakeTrayIcon(-1);
+    if (g.trayIcon == nullptr) g.trayIcon = MakeTrayIcon(-1, -1);
     NOTIFYICONDATAW nid{};
     nid.cbSize = sizeof(nid);
     nid.hWnd = g.panel;
