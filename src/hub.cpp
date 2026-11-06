@@ -33,6 +33,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cmath>
 #include <cwchar>
 #include <string>
 #include <vector>
@@ -128,6 +129,9 @@ struct AppState {
     IDWriteTextFormat* fmtValue = nullptr;
     IDWriteTextFormat* fmtSmall = nullptr;
     IDWriteTextFormat* fmtHead = nullptr;
+    IDWriteTextFormat* fmtWheelBig = nullptr;
+    IDWriteTextFormat* fmtWheelMid = nullptr;
+    IDWriteTextFormat* fmtWheelSmall = nullptr;
 };
 
 AppState g;
@@ -440,12 +444,16 @@ bool CreateTextFormats() {
         IDWriteTextFormat** dst;
         float size;
         DWRITE_FONT_WEIGHT weight;
+        bool center;
     };
     const Spec specs[] = {
-        {&g.fmtHead, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},
-        {&g.fmtTitle, 15.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},
-        {&g.fmtValue, 28.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD},
-        {&g.fmtSmall, 12.0f, DWRITE_FONT_WEIGHT_NORMAL},
+        {&g.fmtHead, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false},
+        {&g.fmtTitle, 15.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false},
+        {&g.fmtValue, 28.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false},
+        {&g.fmtSmall, 12.0f, DWRITE_FONT_WEIGHT_NORMAL, false},
+        {&g.fmtWheelBig, 24.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, true},
+        {&g.fmtWheelMid, 16.0f, DWRITE_FONT_WEIGHT_NORMAL, true},
+        {&g.fmtWheelSmall, 12.0f, DWRITE_FONT_WEIGHT_NORMAL, true},
     };
     for (const Spec& s : specs) {
         if (*s.dst != nullptr) { (*s.dst)->Release(); *s.dst = nullptr; }
@@ -455,6 +463,10 @@ bool CreateTextFormats() {
                                             px, L"zh-CN", s.dst);
         if (FAILED(hr)) return false;
         (*s.dst)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        if (s.center) {
+            (*s.dst)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            (*s.dst)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
     }
     return true;
 }
@@ -533,22 +545,93 @@ void DrawCard(float x, float y, float w, float h, const wchar_t* name, const wch
     }
 }
 
-void OnPaint() {
-    if (g.fmtHead == nullptr) CreateTextFormats();
-    if (!CreateDeviceResources()) return;
-    g.rt->BeginDraw();
-    g.rt->Clear(kBg);
+// ---------- 视图与滚轮 ----------
 
-    // 顶部标题
-    DrawTextAt(L"设备中心", g.fmtHead,
-               D2D1::RectF(S(24), S(20), S(400), S(48)), kText);
+enum class ViewMode { Main, MouseDetail, KbDetail };
+ViewMode g_view = ViewMode::Main;
+
+struct Wheel {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 220.0f;
+    float h = 170.0f;
+    int count = 0;
+    int selected = 0;
+};
+
+Wheel g_dpiWheel;
+Wheel g_rateWheel;
+int g_dragWheel = -1;
+int g_dragStartY = 0;
+int g_dragStartSel = 0;
+int g_pendingWrite = -1;  // 0 = DPI, 1 = Rate
+
+D2D1_COLOR_F AlphaText(float alpha) {
+    return D2D1::ColorF(0.902f, 0.910f, 0.922f, alpha);
+}
+
+// 时钟式滚轮：中间选中项最大最亮，上下各两行逐级缩小变淡
+void DrawWheel(const Wheel& wh, const std::vector<std::wstring>& labels, const wchar_t* title) {
+    const D2D1_RECT_F card = D2D1::RectF(S(wh.x), S(wh.y), S(wh.x + wh.w), S(wh.y + wh.h));
+    FillRound(card, 14, kCard);
+
+    DrawTextAt(title, g.fmtSmall,
+               D2D1::RectF(S(wh.x + 18), S(wh.y - 26), S(wh.x + wh.w - 18), S(wh.y - 6)), kTextDim);
+
+    const float cy = wh.y + wh.h * 0.5f;
+    const float itemH = 34.0f;
+
+    // 选中行的底衬
+    FillRound(D2D1::RectF(S(wh.x + 12), S(cy - itemH * 0.5f), S(wh.x + wh.w - 12), S(cy + itemH * 0.5f)),
+              9, D2D1::ColorF(0.155f, 0.165f, 0.185f));
+
+    for (int d = -2; d <= 2; ++d) {
+        const int idx = wh.selected + d;
+        if (idx < 0 || idx >= wh.count || idx >= static_cast<int>(labels.size())) continue;
+
+        const float y = cy + d * itemH;
+        const float alpha = (d == 0) ? 1.0f : ((d == 1 || d == -1) ? 0.42f : 0.16f);
+        IDWriteTextFormat* fmt = (d == 0) ? g.fmtWheelBig
+                                          : ((d == 1 || d == -1) ? g.fmtWheelMid : g.fmtWheelSmall);
+        DrawTextAt(labels[idx].c_str(), fmt,
+                   D2D1::RectF(S(wh.x), S(y - itemH * 0.5f), S(wh.x + wh.w), S(y + itemH * 0.5f)),
+                   AlphaText(alpha));
+    }
+}
+
+void DrawBackButton() {
+    FillRound(D2D1::RectF(S(24), S(16), S(56), S(48)), 8, kCard);
+    DrawTextAt(L"←", g.fmtHead, D2D1::RectF(S(28), S(18), S(56), S(46)), kText);
+}
+
+void SyncWheels() {
+    g_dpiWheel.x = 88.0f;
+    g_dpiWheel.y = 112.0f;
+    g_dpiWheel.w = 220.0f;
+    g_dpiWheel.h = 170.0f;
+    g_dpiWheel.count = (g.mouseCfg.ok && g.mouseCfg.dpiCount > 0) ? g.mouseCfg.dpiCount : 6;
+    g_dpiWheel.selected = (g.mouseCfg.ok && g.mouseCfg.dpiIndex >= 0) ? g.mouseCfg.dpiIndex : 0;
+    if (g_dpiWheel.selected >= g_dpiWheel.count) g_dpiWheel.selected = g_dpiWheel.count - 1;
+
+    g_rateWheel.x = 452.0f;
+    g_rateWheel.y = 112.0f;
+    g_rateWheel.w = 220.0f;
+    g_rateWheel.h = 170.0f;
+    g_rateWheel.count = 6;
+    g_rateWheel.selected = (g.mouseCfg.ok && g.mouseCfg.rateIndex >= 0) ? g.mouseCfg.rateIndex : 0;
+}
+
+// ---------- 三个视图 ----------
+
+void OnPaintMain() {
+    DrawTextAt(L"设备中心", g.fmtHead, D2D1::RectF(S(24), S(20), S(400), S(48)), kText);
     DrawTextAt(g.portable ? L"便携模式" : L"降级存储", g.fmtSmall,
                D2D1::RectF(S(560), S(26), S(720), S(44)), kTextDim);
 
-    // 两张设备卡片
     const float cardW = 350.0f;
     const float cardH = 200.0f;
-    wchar_t mouseCfgText[64] = L"Mchose A7 Pro";
+
+    wchar_t mouseCfgText[64] = L"MCHOSE A7 Pro";
     if (g.mouseCfg.ok && g.mouseCfg.dpiIndex >= 0 && g.mouseCfg.dpiIndex < 6) {
         const int dpi = g.mouseCfg.dpiList[g.mouseCfg.dpiIndex];
         const int hz = RateHz(g.mouseCfg.rateIndex);
@@ -566,6 +649,7 @@ void OnPaint() {
              g.mouseConnected ? L"2.4G · 已连接" : (mouseSleep ? L"移动鼠标唤醒" : L"未插入接收器"),
              g.mouseConnected ? nullptr : (mouseSleep ? L"无响应" : L"未连接"),
              g.mouseBattery, g.mouseConnected);
+
     const bool kbSleep = !g.kbConnected && g.reading.kbPresent;
     DrawCard(386, 64, cardW, cardH, L"键盘",
              g.kbConnected ? L"EWEADN X87" : (kbSleep ? L"敲击任意键唤醒" : L"请确认已开机"),
@@ -573,12 +657,99 @@ void OnPaint() {
              g.kbConnected ? nullptr : (kbSleep ? L"休眠" : L"未连接"),
              g.kbBattery, g.kbConnected);
 
-    // 关闭按钮
     DrawTextAt(L"×", g.fmtHead, D2D1::RectF(S(716), S(18), S(744), S(46)), kTextDim);
+    DrawTextAt(L"点击设备卡片进入设置　·　Esc 关闭", g.fmtSmall,
+               D2D1::RectF(S(24), S(296), S(736), S(316)), kTextDim);
+}
 
-    // 底部提示
-    DrawTextAt(L"左键托盘打开面板　·　右键托盘显示菜单", g.fmtSmall,
-               D2D1::RectF(S(24), S(284), S(736), S(304)), kTextDim);
+void OnPaintMouseDetail() {
+    DrawBackButton();
+    DrawTextAt(L"鼠标 · MCHOSE A7 Pro", g.fmtHead,
+               D2D1::RectF(S(70), S(20), S(480), S(46)), kText);
+
+    wchar_t status[64];
+    if (g.mouseConnected) {
+        swprintf_s(status, L"%d%%　2.4G", g.mouseBattery);
+    } else {
+        wcscpy_s(status, L"离线");
+    }
+    DrawTextAt(status, g.fmtSmall, D2D1::RectF(S(600), S(24), S(736), S(44)), kTextDim);
+
+    std::vector<std::wstring> dpiLabels;
+    std::vector<std::wstring> rateLabels;
+    for (int i = 0; i < g_dpiWheel.count; ++i) {
+        wchar_t b[24];
+        swprintf_s(b, L"%d", g.mouseCfg.ok ? g.mouseCfg.dpiList[i] : 0);
+        dpiLabels.emplace_back(b);
+    }
+    for (int i = 0; i < 6; ++i) {
+        wchar_t b[24];
+        swprintf_s(b, L"%d", kRateValues[i]);
+        rateLabels.emplace_back(b);
+    }
+
+    DrawWheel(g_dpiWheel, dpiLabels, L"DPI");
+    DrawWheel(g_rateWheel, rateLabels, L"回报率（Hz）");
+
+    DrawTextAt(L"上下滚动选择　·　松开后自动应用", g.fmtSmall,
+               D2D1::RectF(S(24), S(300), S(736), S(320)), kTextDim);
+}
+
+void OnPaintKbDetail() {
+    DrawBackButton();
+    DrawTextAt(L"键盘 · EWEADN X87", g.fmtHead,
+               D2D1::RectF(S(70), S(20), S(480), S(46)), kText);
+
+    wchar_t status[64];
+    if (g.kbConnected) {
+        swprintf_s(status, L"%d%%　2.4G", g.kbBattery);
+    } else {
+        wcscpy_s(status, L"离线");
+    }
+    DrawTextAt(status, g.fmtSmall, D2D1::RectF(S(600), S(24), S(736), S(44)), kTextDim);
+
+    // 电量
+    wchar_t val[32];
+    if (g.kbConnected && g.kbBattery >= 0) {
+        swprintf_s(val, L"%d%%", g.kbBattery);
+    } else {
+        wcscpy_s(val, L"--");
+    }
+    DrawTextAt(val, g.fmtValue, D2D1::RectF(S(24), S(72), S(320), S(124)), kText);
+    DrawTextAt(g.kbConnected ? L"电量" : L"设备未响应", g.fmtSmall,
+               D2D1::RectF(S(24), S(126), S(320), S(144)), kTextDim);
+
+    // 功能占位
+    const wchar_t* titles[] = {L"RGB 灯效", L"按键改键", L"回报率"};
+    const wchar_t* notes[] = {L"协议待逆向（P3）", L"需键位表（P4）", L"协议待逆向"};
+
+    for (int i = 0; i < 3; ++i) {
+        const float x = 24.0f + i * 244.0f;
+        FillRound(D2D1::RectF(S(x), S(168), S(x + 228), S(280)), 12, kCard);
+        DrawTextAt(titles[i], g.fmtTitle, D2D1::RectF(S(x + 18), S(186), S(x + 210), S(208)), kText);
+        DrawTextAt(notes[i], g.fmtSmall, D2D1::RectF(S(x + 18), S(210), S(x + 210), S(228)), kTextDim);
+        DrawTextAt(L"待开发", g.fmtSmall, D2D1::RectF(S(x + 18), S(244), S(x + 210), S(266)), kTextDim);
+    }
+}
+
+void OnPaint() {
+    if (g.fmtHead == nullptr) CreateTextFormats();
+    if (!CreateDeviceResources()) return;
+
+    g.rt->BeginDraw();
+    g.rt->Clear(kBg);
+
+    switch (g_view) {
+        case ViewMode::MouseDetail:
+            OnPaintMouseDetail();
+            break;
+        case ViewMode::KbDetail:
+            OnPaintKbDetail();
+            break;
+        default:
+            OnPaintMain();
+            break;
+    }
 
     HRESULT hr = g.rt->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) DiscardDeviceResources();
@@ -600,38 +771,6 @@ void ShowTrayMenu() {
 
     SetForegroundWindow(g.panel);
     TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, g.panel, nullptr);
-    DestroyMenu(menu);
-}
-
-// 点击配置行弹出的菜单：DPI 六档 + 回报率六档，当前值打勾
-void ShowMouseMenu() {
-    HMENU menu = CreatePopupMenu();
-
-    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, L"DPI");
-    for (int i = 0; i < 6; ++i) {
-        wchar_t label[48];
-        const int dpi = g.mouseCfg.ok ? g.mouseCfg.dpiList[i] : 0;
-        swprintf_s(label, L"   %d DPI", dpi);
-        UINT flags = MF_STRING;
-        if (g.mouseCfg.ok && i == g.mouseCfg.dpiIndex) flags |= MF_CHECKED;
-        if (g.mouseCfg.ok && i >= g.mouseCfg.dpiCount) flags |= MF_GRAYED;  // 未启用的档
-        AppendMenuW(menu, flags, IDM_DPI_BASE + i, label);
-    }
-
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, L"回报率（2.4G）");
-    for (int i = 0; i < 6; ++i) {
-        wchar_t label[48];
-        swprintf_s(label, L"   %d Hz", kRateValues[i]);
-        UINT flags = MF_STRING;
-        if (g.mouseCfg.ok && i == g.mouseCfg.rateIndex) flags |= MF_CHECKED;
-        AppendMenuW(menu, flags, IDM_RATE_BASE + i, label);
-    }
-
-    POINT pt{};
-    GetCursorPos(&pt);
-    SetForegroundWindow(g.panel);
-    TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.panel, nullptr);
     DestroyMenu(menu);
 }
 
@@ -735,6 +874,9 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             drop(g.fmtTitle);
             drop(g.fmtValue);
             drop(g.fmtSmall);
+            drop(g.fmtWheelBig);
+            drop(g.fmtWheelMid);
+            drop(g.fmtWheelSmall);
             DiscardDeviceResources();
             const RECT* prc = reinterpret_cast<const RECT*>(lp);
             SetWindowPos(hwnd, nullptr, prc->left, prc->top,
@@ -758,23 +900,169 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return HTCLIENT;
         }
 
-        case WM_LBUTTONUP: {
+        case WM_LBUTTONDOWN: {
+            if (g_view == ViewMode::Main) return 0;
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            if (pt.x > static_cast<LONG>(S(700)) && pt.y < static_cast<LONG>(S(56))) {
-                HidePanel();
+
+            // 返回按钮
+            if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(56)) &&
+                pt.y >= static_cast<LONG>(S(16)) && pt.y <= static_cast<LONG>(S(48))) {
+                g_view = ViewMode::Main;
+                InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
-            // 鼠标卡片的配置行：弹出 DPI / 回报率菜单
-            if (pt.x >= static_cast<LONG>(S(40)) && pt.x <= static_cast<LONG>(S(358)) &&
-                pt.y >= static_cast<LONG>(S(176)) && pt.y <= static_cast<LONG>(S(198)) &&
-                g.mouseConnected) {
-                ShowMouseMenu();
+            if (g_view != ViewMode::MouseDetail) return 0;
+
+            // 命中滚轮：记录拖动起点，并直接定位到点击处最近的一档
+            auto tryHit = [&](Wheel& w, int id) -> bool {
+                if (pt.x < static_cast<LONG>(S(w.x)) || pt.x > static_cast<LONG>(S(w.x + w.w))) return false;
+                if (pt.y < static_cast<LONG>(S(w.y)) || pt.y > static_cast<LONG>(S(w.y + w.h))) return false;
+
+                g_dragWheel = id;
+                g_dragStartY = pt.y;
+                g_dragStartSel = w.selected;
+
+                const float cy = S(w.y + w.h * 0.5f);
+                int target = w.selected + static_cast<int>(std::lround((pt.y - cy) / S(34.0f)));
+                if (target < 0) target = 0;
+                if (target >= w.count) target = w.count - 1;
+                if (w.selected != target) {
+                    w.selected = target;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                return true;
+            };
+            if (tryHit(g_dpiWheel, 0)) return 0;
+            if (tryHit(g_rateWheel, 1)) return 0;
+            return 0;
+        }
+
+        case WM_MOUSEMOVE:
+            if (g_dragWheel >= 0) {
+                POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                Wheel& w = (g_dragWheel == 0) ? g_dpiWheel : g_rateWheel;
+                int target = g_dragStartSel +
+                             static_cast<int>(std::lround((g_dragStartY - pt.y) / S(34.0f)));
+                if (target < 0) target = 0;
+                if (target >= w.count) target = w.count - 1;
+                if (w.selected != target) {
+                    w.selected = target;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+            return 0;
+
+        case WM_LBUTTONUP: {
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+
+            // 松开滚轮：延迟 400 ms 写入，避免快速滚动时连续写设备
+            if (g_dragWheel >= 0) {
+                g_pendingWrite = g_dragWheel;
+                g_dragWheel = -1;
+                SetTimer(hwnd, 2, 400, nullptr);
+                return 0;
+            }
+
+            if (g_view == ViewMode::Main) {
+                if (pt.x > static_cast<LONG>(S(700)) && pt.y < static_cast<LONG>(S(56))) {
+                    HidePanel();
+                    return 0;
+                }
+                if (pt.y >= static_cast<LONG>(S(64)) && pt.y <= static_cast<LONG>(S(264))) {
+                    if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(374))) {
+                        SyncWheels();
+                        g_view = ViewMode::MouseDetail;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
+                    if (pt.x >= static_cast<LONG>(S(386)) && pt.x <= static_cast<LONG>(S(736))) {
+                        g_view = ViewMode::KbDetail;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
+                }
+                return 0;
+            }
+
+            if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(56)) &&
+                pt.y >= static_cast<LONG>(S(16)) && pt.y <= static_cast<LONG>(S(48))) {
+                g_view = ViewMode::Main;
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
 
+        case WM_MOUSEWHEEL: {
+            if (g_view != ViewMode::MouseDetail) return 0;
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            const int step = (GET_WHEEL_DELTA_WPARAM(wp) > 0) ? -1 : 1;
+
+            Wheel* w = nullptr;
+            int which = -1;
+            if (pt.x >= static_cast<LONG>(S(g_dpiWheel.x)) &&
+                pt.x <= static_cast<LONG>(S(g_dpiWheel.x + g_dpiWheel.w)) &&
+                pt.y >= static_cast<LONG>(S(g_dpiWheel.y)) &&
+                pt.y <= static_cast<LONG>(S(g_dpiWheel.y + g_dpiWheel.h))) {
+                w = &g_dpiWheel;
+                which = 0;
+            } else if (pt.x >= static_cast<LONG>(S(g_rateWheel.x)) &&
+                       pt.x <= static_cast<LONG>(S(g_rateWheel.x + g_rateWheel.w)) &&
+                       pt.y >= static_cast<LONG>(S(g_rateWheel.y)) &&
+                       pt.y <= static_cast<LONG>(S(g_rateWheel.y + g_rateWheel.h))) {
+                w = &g_rateWheel;
+                which = 1;
+            }
+            if (w == nullptr) return 0;
+
+            int target = w->selected + step;
+            if (target < 0) target = 0;
+            if (target >= w->count) target = w->count - 1;
+            if (w->selected != target) {
+                w->selected = target;
+                g_pendingWrite = which;
+                SetTimer(hwnd, 2, 400, nullptr);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+
+        case WM_TIMER:
+            if (wp == 2) {
+                KillTimer(hwnd, 2);
+                const int which = g_pendingWrite;
+                g_pendingWrite = -1;
+                if (which < 0) return 0;
+
+                bool ok = false;
+                if (which == 0) {
+                    ok = WriteMouseDpi(g_dpiWheel.selected);
+                } else {
+                    const int usb = g.mouseCfg.ok ? g.mouseCfg.usbRateIndex : g_rateWheel.selected;
+                    ok = WriteMouseRate(usb, g_rateWheel.selected);
+                }
+
+                if (ok) {
+                    if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
+                } else {
+                    SyncWheels();  // 回滚到设备当前值
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    MessageBoxW(hwnd, which == 0 ? L"切换 DPI 失败，已回滚。"
+                                                : L"切换回报率失败，已回滚。",
+                                kAppTitle, MB_OK | MB_ICONWARNING);
+                }
+            }
+            return 0;
+
         case WM_KEYDOWN:
-            if (wp == VK_ESCAPE) HidePanel();
+            if (wp == VK_ESCAPE) {
+                if (g_view != ViewMode::Main) {
+                    g_view = ViewMode::Main;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else {
+                    HidePanel();
+                }
+            }
             return 0;
 
         case WM_TRAYICON:
@@ -787,6 +1075,20 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g.mouseBattery = r.mouseBattery;
             g.kbConnected = r.kbOk;
             g.kbBattery = r.kbBattery;
+
+            // 设备是真相源：无拖动、无待写入时，滚轮跟随设备实际档位
+            if (g_view == ViewMode::MouseDetail && g_dragWheel < 0 && g_pendingWrite < 0 &&
+                g.mouseCfg.ok) {
+                const int d = g.mouseCfg.dpiIndex;
+                if (d >= 0 && d < g_dpiWheel.count && d != g_dpiWheel.selected) {
+                    g_dpiWheel.selected = d;
+                }
+                const int rt = g.mouseCfg.rateIndex;
+                if (rt >= 0 && rt < g_rateWheel.count && rt != g_rateWheel.selected) {
+                    g_rateWheel.selected = rt;
+                }
+            }
+
             UpdateTrayIcon();
             if (g.panelVisible) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -809,28 +1111,8 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     g.exiting = true;
                     DestroyWindow(hwnd);
                     break;
-                default: {
-                    const int id = LOWORD(wp);
-                    if (id >= IDM_DPI_BASE && id < IDM_DPI_BASE + 6) {
-                        const int idx = id - IDM_DPI_BASE;
-                        if (WriteMouseDpi(idx)) {
-                            if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
-                        } else {
-                            MessageBoxW(hwnd, L"切换 DPI 失败：设备未响应或校验不一致。",
-                                        kAppTitle, MB_OK | MB_ICONWARNING);
-                        }
-                    } else if (id >= IDM_RATE_BASE && id < IDM_RATE_BASE + 6) {
-                        const int idx = id - IDM_RATE_BASE;
-                        const int usb = g.mouseCfg.ok ? g.mouseCfg.usbRateIndex : idx;
-                        if (WriteMouseRate(usb, idx)) {
-                            if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
-                        } else {
-                            MessageBoxW(hwnd, L"切换回报率失败：设备未响应。",
-                                        kAppTitle, MB_OK | MB_ICONWARNING);
-                        }
-                    }
+                default:
                     break;
-                }
             }
             return 0;
 
@@ -1033,6 +1315,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (g.fmtTitle) g.fmtTitle->Release();
     if (g.fmtValue) g.fmtValue->Release();
     if (g.fmtSmall) g.fmtSmall->Release();
+    if (g.fmtWheelBig) g.fmtWheelBig->Release();
+    if (g.fmtWheelMid) g.fmtWheelMid->Release();
+    if (g.fmtWheelSmall) g.fmtWheelSmall->Release();
     if (g.fmtHead) g.fmtHead->Release();
     if (g.dw) g.dw->Release();
     if (g.d2d) g.d2d->Release();
