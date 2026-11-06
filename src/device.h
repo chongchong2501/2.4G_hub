@@ -53,8 +53,8 @@ struct KeyboardLed {
 };
 KeyboardLed ReadKeyboardLed();
 
-// 只改亮度与速度，其余字段原样保留；写完回读确认
-bool WriteKeyboardLed(int brightness, int speed);
+// 设定模式/亮度/速度，其余字段原样保留
+bool WriteKeyboardLed(int mode, int brightness, int speed);
 
 // ---------- 配置备份与恢复（FR-T4） ----------
 

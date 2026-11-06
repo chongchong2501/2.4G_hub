@@ -562,8 +562,26 @@ struct Wheel {
 
 Wheel g_dpiWheel;
 Wheel g_rateWheel;
+Wheel g_modeWheel;
 Wheel g_brightWheel;
 Wheel g_speedWheel;
+
+// 灯效模式表（来自 E HUB i18n 的 huafenda 分组）
+const int kLedModeValues[22] = {9999, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+                                12, 13, 14, 15, 16, 17, 18, 19, 254, 20};
+const wchar_t* kLedModeNames[22] = {
+    L"关闭灯效", L"静态恒亮", L"按压点亮", L"释放熄灭", L"繁星点点", L"漫天飞雪",
+    L"百花争艳", L"动态呼吸", L"光谱循环", L"彩泉涌动", L"多彩纵横", L"随波逐流",
+    L"峰回路转", L"一触即发", L"一石二鸟", L"涟漪扩散", L"川流不息", L"重峦叠嶂",
+    L"斜风细雨", L"来回穿梭", L"心动时刻", L"自定义"};
+constexpr int kLedModeCount = 22;
+
+int LedModeIndex(int modeValue) {
+    for (int i = 0; i < kLedModeCount; ++i) {
+        if (kLedModeValues[i] == modeValue) return i;
+    }
+    return 1;
+}
 int g_dragWheel = -1;
 int g_dragStartY = 0;
 int g_dragStartSel = 0;
@@ -611,7 +629,8 @@ Wheel* WheelById(int id) {
     switch (id) {
         case 0: return &g_dpiWheel;
         case 1: return &g_rateWheel;
-        case 2: return &g_brightWheel;
+        case 2: return &g_modeWheel;
+        case 3: return &g_brightWheel;
         default: return &g_speedWheel;
     }
 }
@@ -708,19 +727,26 @@ void OnPaintMouseDetail() {
 }
 
 void SyncKbWheels() {
-    g_brightWheel.x = 180.0f;
+    g_modeWheel.x = 24.0f;
+    g_modeWheel.y = 108.0f;
+    g_modeWheel.w = 300.0f;
+    g_modeWheel.h = 190.0f;
+    g_modeWheel.count = kLedModeCount;
+    g_modeWheel.selected = LedModeIndex(g.kbLed.ok ? g.kbLed.mode : 1);
+
+    g_brightWheel.x = 350.0f;
     g_brightWheel.y = 108.0f;
-    g_brightWheel.w = 230.0f;
-    g_brightWheel.h = 160.0f;
+    g_brightWheel.w = 150.0f;
+    g_brightWheel.h = 190.0f;
     g_brightWheel.count = 6;
     g_brightWheel.selected = g.kbLed.ok ? g.kbLed.brightness : 0;
     if (g_brightWheel.selected < 0) g_brightWheel.selected = 0;
     if (g_brightWheel.selected > 5) g_brightWheel.selected = 5;
 
-    g_speedWheel.x = 430.0f;
+    g_speedWheel.x = 524.0f;
     g_speedWheel.y = 108.0f;
-    g_speedWheel.w = 230.0f;
-    g_speedWheel.h = 160.0f;
+    g_speedWheel.w = 150.0f;
+    g_speedWheel.h = 190.0f;
     g_speedWheel.count = 6;
     g_speedWheel.selected = g.kbLed.ok ? g.kbLed.speed : 0;
     if (g_speedWheel.selected < 0) g_speedWheel.selected = 0;
@@ -740,28 +766,22 @@ void OnPaintKbDetail() {
     }
     DrawTextAt(status, g.fmtSmall, D2D1::RectF(S(600), S(24), S(736), S(44)), kTextDim);
 
-    // 电量
-    wchar_t val[32];
-    if (g.kbConnected && g.kbBattery >= 0) {
-        swprintf_s(val, L"%d%%", g.kbBattery);
-    } else {
-        wcscpy_s(val, L"--");
-    }
-    DrawTextAt(val, g.fmtValue, D2D1::RectF(S(28), S(96), S(170), S(148)), kText);
-    DrawTextAt(L"电量", g.fmtSmall, D2D1::RectF(S(28), S(150), S(170), S(168)), kTextDim);
+    std::vector<std::wstring> modeLabels;
+    for (int i = 0; i < kLedModeCount; ++i) modeLabels.emplace_back(kLedModeNames[i]);
 
-    std::vector<std::wstring> labels;
+    std::vector<std::wstring> numLabels;
     for (int i = 0; i <= 5; ++i) {
         wchar_t b[8];
         swprintf_s(b, L"%d", i);
-        labels.emplace_back(b);
+        numLabels.emplace_back(b);
     }
 
-    DrawWheel(g_brightWheel, labels, L"亮度");
-    DrawWheel(g_speedWheel, labels, L"速度");
+    DrawWheel(g_modeWheel, modeLabels, L"灯效");
+    DrawWheel(g_brightWheel, numLabels, L"亮度");
+    DrawWheel(g_speedWheel, numLabels, L"速度");
 
-    DrawTextAt(L"上下滚动调整　·　松开后自动应用　·　灯效模式与改键待开发", g.fmtSmall,
-               D2D1::RectF(S(28), S(294), S(736), S(314)), kTextDim);
+    DrawTextAt(L"上下滚动选择　·　松开后自动应用　·　改键待开发", g.fmtSmall,
+               D2D1::RectF(S(24), S(308), S(736), S(328)), kTextDim);
 }
 
 void OnPaint() {
@@ -1103,7 +1123,8 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (wp == 3) {
                 KillTimer(hwnd, 3);
                 g_pendingWrite = -1;
-                if (WriteKeyboardLed(g_brightWheel.selected, g_speedWheel.selected)) {
+                if (WriteKeyboardLed(kLedModeValues[g_modeWheel.selected], g_brightWheel.selected,
+                                     g_speedWheel.selected)) {
                     if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
                 } else {
                     SyncKbWheels();
@@ -1145,14 +1166,6 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const int rt = g.mouseCfg.rateIndex;
                 if (rt >= 0 && rt < g_rateWheel.count && rt != g_rateWheel.selected) {
                     g_rateWheel.selected = rt;
-                }
-            } else if (g_view == ViewMode::KbDetail && g_dragWheel < 0 && g_pendingWrite < 0 &&
-                       g.kbLed.ok) {
-                if (g.kbLed.brightness >= 0 && g.kbLed.brightness <= 5) {
-                    g_brightWheel.selected = g.kbLed.brightness;
-                }
-                if (g.kbLed.speed >= 0 && g.kbLed.speed <= 5) {
-                    g_speedWheel.selected = g.kbLed.speed;
                 }
             }
 

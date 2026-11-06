@@ -268,6 +268,12 @@ bool ReadKeyboardBattery(DeviceReading* r) {
             continue;
         }
         const BYTE* info = resp.data() + 9;
+        // 噪声帧校验：偶发返回 VID 0x0002 / 电量 0 的无效数据
+        const USHORT vid = static_cast<USHORT>(info[4] | (info[5] << 8));
+        if (vid != kKbVid) {
+            Sleep(120);
+            continue;
+        }
         r->kbOk = true;
         r->kbBattery = info[17];
         r->kbCharge = info[18];
@@ -411,7 +417,14 @@ KeyboardLed ReadKeyboardLed() {
     if (h == INVALID_HANDLE_VALUE) return k;
 
     BYTE led[16] = {};
-    if (KbReadLedBlock(h, led)) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (!KbReadLedBlock(h, led)) { Sleep(120); continue; }
+        const int m = led[0];
+        // 合法灯效模式：1..20 或 254
+        if ((m >= 1 && m <= 20) || m == 254) break;
+        Sleep(120);
+    }
+    if ((led[0] >= 1 && led[0] <= 20) || led[0] == 254) {
         k.ok = true;
         k.mode = led[0];
         k.r = led[1];
@@ -425,7 +438,7 @@ KeyboardLed ReadKeyboardLed() {
     return k;
 }
 
-bool WriteKeyboardLed(int brightness, int speed) {
+bool WriteKeyboardLed(int mode, int brightness, int speed) {
     Iface it;
     if (!FindIface(kKbVid, kKbPid, kKbPage, kKbUsage, &it)) return false;
 
@@ -440,18 +453,15 @@ bool WriteKeyboardLed(int brightness, int speed) {
         return false;
     }
 
+    led[0] = static_cast<BYTE>(mode & 0xFF);
     led[4] = 255;
     led[9] = static_cast<BYTE>(brightness & 0xFF);
     led[10] = static_cast<BYTE>(speed & 0xFF);
     led[14] = 0xAA;
     led[15] = 0x55;
 
-    bool ok = KbWriteLedBlock(h, led);
-    if (ok) {
-        Sleep(200);
-        BYTE check[16] = {};
-        ok = KbReadLedBlock(h, check) && check[9] == led[9];
-    }
+    // 灯效是动态的，读回值不可靠，只校验写入是否被接受
+    const bool ok = KbWriteLedBlock(h, led);
     CloseHandle(h);
     return ok;
 }
