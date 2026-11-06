@@ -569,14 +569,14 @@ Wheel g_brightWheel;
 Wheel g_speedWheel;
 
 // 灯效模式表（来自 E HUB i18n 的 huafenda 分组）
-const int kLedModeValues[22] = {9999, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
-                                12, 13, 14, 15, 16, 17, 18, 19, 254, 20};
-const wchar_t* kLedModeNames[22] = {
+const int kLedModeValues[21] = {9999, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+                                11, 12, 13, 14, 15, 16, 17, 18, 19, 254};
+const wchar_t* kLedModeNames[21] = {
     L"关闭灯效", L"静态恒亮", L"按压点亮", L"释放熄灭", L"繁星点点", L"漫天飞雪",
     L"百花争艳", L"动态呼吸", L"光谱循环", L"彩泉涌动", L"多彩纵横", L"随波逐流",
     L"峰回路转", L"一触即发", L"一石二鸟", L"涟漪扩散", L"川流不息", L"重峦叠嶂",
-    L"斜风细雨", L"来回穿梭", L"心动时刻", L"自定义"};
-constexpr int kLedModeCount = 22;
+    L"斜风细雨", L"来回穿梭", L"心动时刻"};
+constexpr int kLedModeCount = 21;
 
 int LedModeIndex(int modeValue) {
     for (int i = 0; i < kLedModeCount; ++i) {
@@ -968,9 +968,14 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NCHITTEST: {
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
-            // 顶部 56px 可拖动；右上角关闭按钮除外
+            // 顶部 56px 可拖动；右上角关闭按钮与详情页返回按钮除外
             if (pt.y < static_cast<LONG>(S(56))) {
                 if (pt.x > static_cast<LONG>(S(700))) return HTCLIENT;
+                if (g_view != ViewMode::Main &&
+                    pt.x >= static_cast<LONG>(S(20)) && pt.x <= static_cast<LONG>(S(60)) &&
+                    pt.y >= static_cast<LONG>(S(12)) && pt.y <= static_cast<LONG>(S(52))) {
+                    return HTCLIENT;   // 返回按钮区域不当作标题栏
+                }
                 return HTCAPTION;
             }
             return HTCLIENT;
