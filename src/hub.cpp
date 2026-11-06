@@ -75,7 +75,9 @@ constexpr int IDM_EXIT = 1004;
 constexpr int IDM_DPI_BASE = 2000;
 constexpr int IDM_RATE_BASE = 2100;
 
-const int kRateValues[6] = {125, 500, 1000, 2000, 4000, 8000};
+// A7 Pro 为 1K 款：回报率仅支持 125 / 500 / 1000
+const int kRateValues[6] = {125, 500, 1000, 0, 0, 0};
+constexpr int kRateCount = 3;
 
 // §4.5 色板
 const D2D1_COLOR_F kBg = D2D1::ColorF(0x1B1D21);
@@ -648,8 +650,9 @@ void SyncWheels() {
     g_rateWheel.y = 112.0f;
     g_rateWheel.w = 220.0f;
     g_rateWheel.h = 170.0f;
-    g_rateWheel.count = 6;
+    g_rateWheel.count = kRateCount;
     g_rateWheel.selected = (g.mouseCfg.ok && g.mouseCfg.rateIndex >= 0) ? g.mouseCfg.rateIndex : 0;
+    if (g_rateWheel.selected >= kRateCount) g_rateWheel.selected = kRateCount - 1;
 }
 
 // ---------- 三个视图 ----------
@@ -713,7 +716,7 @@ void OnPaintMouseDetail() {
         swprintf_s(b, L"%d", g.mouseCfg.ok ? g.mouseCfg.dpiList[i] : 0);
         dpiLabels.emplace_back(b);
     }
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < kRateCount; ++i) {
         wchar_t b[24];
         swprintf_s(b, L"%d", kRateValues[i]);
         rateLabels.emplace_back(b);
@@ -722,8 +725,16 @@ void OnPaintMouseDetail() {
     DrawWheel(g_dpiWheel, dpiLabels, L"DPI");
     DrawWheel(g_rateWheel, rateLabels, L"回报率（Hz）");
 
-    DrawTextAt(L"上下滚动选择　·　松开后自动应用", g.fmtSmall,
-               D2D1::RectF(S(24), S(300), S(736), S(320)), kTextDim);
+    // DPI 档位增删按钮
+    FillRound(D2D1::RectF(S(132), S(288), S(192), S(314)), 8,
+              D2D1::ColorF(0.175f, 0.185f, 0.205f));
+    FillRound(D2D1::RectF(S(204), S(288), S(264), S(314)), 8,
+              D2D1::ColorF(0.175f, 0.185f, 0.205f));
+    DrawTextAt(L"+", g.fmtWheelMid, D2D1::RectF(S(132), S(288), S(192), S(314)), kText);
+    DrawTextAt(L"−", g.fmtWheelMid, D2D1::RectF(S(204), S(288), S(264), S(314)), kText);
+
+    DrawTextAt(L"滚轮选择　·　+ / − 增删档位　·　松开后自动应用", g.fmtSmall,
+               D2D1::RectF(S(300), S(292), S(736), S(312)), kTextDim);
 }
 
 void SyncKbWheels() {
@@ -780,7 +791,7 @@ void OnPaintKbDetail() {
     DrawWheel(g_brightWheel, numLabels, L"亮度");
     DrawWheel(g_speedWheel, numLabels, L"速度");
 
-    DrawTextAt(L"上下滚动选择　·　松开后自动应用　·　改键待开发", g.fmtSmall,
+    DrawTextAt(L"上下滚动选择　·　松开后自动应用", g.fmtSmall,
                D2D1::RectF(S(24), S(308), S(736), S(328)), kTextDim);
 }
 
@@ -984,11 +995,50 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return true;
             };
             if (g_view == ViewMode::MouseDetail) {
+                // 增删 DPI 档位
+                const bool inPlus = pt.x >= static_cast<LONG>(S(120)) &&
+                                    pt.x <= static_cast<LONG>(S(200)) &&
+                                    pt.y >= static_cast<LONG>(S(280)) &&
+                                    pt.y <= static_cast<LONG>(S(330));
+                const bool inMinus = pt.x >= static_cast<LONG>(S(200)) &&
+                                     pt.x <= static_cast<LONG>(S(280)) &&
+                                     pt.y >= static_cast<LONG>(S(280)) &&
+                                     pt.y <= static_cast<LONG>(S(330));
+                if (inPlus || inMinus) {
+                    if (!g.mouseCfg.ok) return 0;
+                    int count = g.mouseCfg.dpiCount;
+                    if (count < 1) count = 1;
+                    int vals[6] = {};
+                    for (int i = 0; i < count && i < 6; ++i) vals[i] = g.mouseCfg.dpiList[i];
+
+                    if (inPlus) {
+                        if (count >= 6) return 0;
+                        int base = vals[count - 1];
+                        for (int i = count - 1; i >= 0; --i) {
+                            if (vals[i] < 26000) { base = vals[i]; break; }
+                        }
+                        int next = base * 2;
+                        if (next > 26000) next = 26000;
+                        next = (next / 50) * 50;
+                        if (next < 100) next = 100;
+                        vals[count] = next;
+                        SetMouseDpiStages(vals, count + 1, g_dpiWheel.selected);
+                    } else {
+                        if (count <= 1) return 0;
+                        int active = g_dpiWheel.selected;
+                        if (active >= count - 1) active = count - 2;
+                        SetMouseDpiStages(vals, count - 1, active);
+                    }
+                    if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
+                    return 0;
+                }
+
                 if (tryHit(g_dpiWheel, 0)) return 0;
                 if (tryHit(g_rateWheel, 1)) return 0;
             } else {
-                if (tryHit(g_brightWheel, 2)) return 0;
-                if (tryHit(g_speedWheel, 3)) return 0;
+                if (tryHit(g_modeWheel, 2)) return 0;
+                if (tryHit(g_brightWheel, 3)) return 0;
+                if (tryHit(g_speedWheel, 4)) return 0;
             }
             return 0;
         }
@@ -1057,30 +1107,40 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             Wheel* w = nullptr;
             int which = -1;
-            if (pt.x >= static_cast<LONG>(S(g_dpiWheel.x)) &&
+            const bool mousePage = (g_view == ViewMode::MouseDetail);
+            const bool kbPage = (g_view == ViewMode::KbDetail);
+
+            if (mousePage &&
+                pt.x >= static_cast<LONG>(S(g_dpiWheel.x)) &&
                 pt.x <= static_cast<LONG>(S(g_dpiWheel.x + g_dpiWheel.w)) &&
                 pt.y >= static_cast<LONG>(S(g_dpiWheel.y)) &&
                 pt.y <= static_cast<LONG>(S(g_dpiWheel.y + g_dpiWheel.h))) {
                 w = &g_dpiWheel;
                 which = 0;
-            } else if (pt.x >= static_cast<LONG>(S(g_rateWheel.x)) &&
+            } else if (mousePage && pt.x >= static_cast<LONG>(S(g_rateWheel.x)) &&
                        pt.x <= static_cast<LONG>(S(g_rateWheel.x + g_rateWheel.w)) &&
                        pt.y >= static_cast<LONG>(S(g_rateWheel.y)) &&
                        pt.y <= static_cast<LONG>(S(g_rateWheel.y + g_rateWheel.h))) {
                 w = &g_rateWheel;
                 which = 1;
-            } else if (pt.x >= static_cast<LONG>(S(g_brightWheel.x)) &&
+            } else if (kbPage && pt.x >= static_cast<LONG>(S(g_modeWheel.x)) &&
+                       pt.x <= static_cast<LONG>(S(g_modeWheel.x + g_modeWheel.w)) &&
+                       pt.y >= static_cast<LONG>(S(g_modeWheel.y)) &&
+                       pt.y <= static_cast<LONG>(S(g_modeWheel.y + g_modeWheel.h))) {
+                w = &g_modeWheel;
+                which = 2;
+            } else if (kbPage && pt.x >= static_cast<LONG>(S(g_brightWheel.x)) &&
                        pt.x <= static_cast<LONG>(S(g_brightWheel.x + g_brightWheel.w)) &&
                        pt.y >= static_cast<LONG>(S(g_brightWheel.y)) &&
                        pt.y <= static_cast<LONG>(S(g_brightWheel.y + g_brightWheel.h))) {
                 w = &g_brightWheel;
-                which = 2;
-            } else if (pt.x >= static_cast<LONG>(S(g_speedWheel.x)) &&
+                which = 3;
+            } else if (kbPage && pt.x >= static_cast<LONG>(S(g_speedWheel.x)) &&
                        pt.x <= static_cast<LONG>(S(g_speedWheel.x + g_speedWheel.w)) &&
                        pt.y >= static_cast<LONG>(S(g_speedWheel.y)) &&
                        pt.y <= static_cast<LONG>(S(g_speedWheel.y + g_speedWheel.h))) {
                 w = &g_speedWheel;
-                which = 3;
+                which = 4;
             }
             if (w == nullptr) return 0;
 
@@ -1162,6 +1222,9 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const int d = g.mouseCfg.dpiIndex;
                 if (d >= 0 && d < g_dpiWheel.count && d != g_dpiWheel.selected) {
                     g_dpiWheel.selected = d;
+                }
+                if (g.mouseCfg.dpiCount > 0 && g.mouseCfg.dpiCount != g_dpiWheel.count) {
+                    g_dpiWheel.count = g.mouseCfg.dpiCount;
                 }
                 const int rt = g.mouseCfg.rateIndex;
                 if (rt >= 0 && rt < g_rateWheel.count && rt != g_rateWheel.selected) {

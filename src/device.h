@@ -76,5 +76,8 @@ bool WriteMouseRate(int usbRate, int freeRate);
 // 单命令写活动 DPI 档（0x11 0x40）。六档数值取自当前配置，仅切换活动档并回读确认
 bool WriteMouseDpi(int activeIndex);
 
+// 设置 DPI 档位列表（1..6 档）与活动档，用于增删档位
+bool SetMouseDpiStages(const int* values, int count, int activeIndex);
+
 // 备份文件路径
 std::wstring MouseBackupPath(const std::wstring& configDir);

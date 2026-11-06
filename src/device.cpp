@@ -602,6 +602,52 @@ bool WriteMouseDpi(int activeIndex) {
     return ok;
 }
 
+bool SetMouseDpiStages(const int* values, int count, int activeIndex) {
+    if (values == nullptr || count < 1 || count > 6) return false;
+    if (activeIndex < 0 || activeIndex >= count) return false;
+
+    Iface it;
+    if (!FindIface(kMouseVid, 0, kMousePage, 0, &it)) return false;
+    HANDLE h = CreateFileW(it.path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    std::vector<BYTE> probe;
+    if (!ReadConfigBlock(h, &probe)) {   // 写前必读
+        CloseHandle(h);
+        return false;
+    }
+
+    BYTE f[21];
+    memset(f, 0, sizeof(f));
+    f[0] = 0x11;
+    f[1] = 0x40;
+    f[2] = static_cast<BYTE>(activeIndex);  // usbDpiIndex
+    f[3] = static_cast<BYTE>(activeIndex);  // gDpiIndex
+    f[4] = 0;                               // reserved
+    for (int i = 0; i < 6; ++i) {
+        const int v = (i < count) ? values[i] : values[count - 1];
+        f[5 + i * 2] = static_cast<BYTE>(v & 0xFF);
+        f[6 + i * 2] = static_cast<BYTE>((v >> 8) & 0xFF);
+    }
+    f[17] = static_cast<BYTE>(count);       // dpiSum = 启用档数
+    for (int i = 1; i < 21; ++i) f[i] = static_cast<BYTE>(f[i] ^ 0xFF);
+
+    bool ok = HidD_SetFeature(h, f, 21) != FALSE;
+    if (ok) {
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            Sleep(120);
+            std::vector<BYTE> cur;
+            if (!ReadConfigBlock(h, &cur) || cur.size() < 20) continue;
+            if ((cur[2] & 0x0F) == activeIndex && cur[16] == count) break;
+            if (attempt == 7) ok = false;
+        }
+    }
+    CloseHandle(h);
+    return ok;
+}
+
 bool RestoreMouseConfig(const std::wstring& configDir) {
     const std::wstring path = MouseBackupPath(configDir);
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
