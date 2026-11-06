@@ -588,6 +588,9 @@ int g_dragWheel = -1;
 int g_dragStartY = 0;
 int g_dragStartSel = 0;
 int g_pendingWrite = -1;  // 0 = DPI, 1 = Rate
+bool g_dpiInputMode = false;      // 正在输入新 DPI
+std::wstring g_dpiInputText;
+bool g_cursorVisible = true;
 
 D2D1_COLOR_F AlphaText(float alpha) {
     return D2D1::ColorF(0.902f, 0.910f, 0.922f, alpha);
@@ -711,10 +714,16 @@ void OnPaintMouseDetail() {
 
     std::vector<std::wstring> dpiLabels;
     std::vector<std::wstring> rateLabels;
-    for (int i = 0; i < g_dpiWheel.count; ++i) {
+    const int stageCount = g.mouseCfg.ok ? g.mouseCfg.dpiCount : 0;
+    for (int i = 0; i < stageCount; ++i) {
         wchar_t b[24];
-        swprintf_s(b, L"%d", g.mouseCfg.ok ? g.mouseCfg.dpiList[i] : 0);
+        swprintf_s(b, L"%d", g.mouseCfg.dpiList[i]);
         dpiLabels.emplace_back(b);
+    }
+    if (g_dpiInputMode) {
+        std::wstring line = g_dpiInputText.empty() ? std::wstring(L"输入 DPI") : g_dpiInputText;
+        if (g_dpiInputText.empty() || g_cursorVisible) line += L"|";
+        dpiLabels.emplace_back(line);
     }
     for (int i = 0; i < kRateCount; ++i) {
         wchar_t b[24];
@@ -965,8 +974,8 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_LBUTTONDOWN: {
-            if (g_view == ViewMode::Main) return 0;
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (g_view == ViewMode::Main) return 0;
 
             // 返回按钮
             if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(56)) &&
@@ -1013,16 +1022,15 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
                     if (inPlus) {
                         if (count >= 6) return 0;
-                        int base = vals[count - 1];
-                        for (int i = count - 1; i >= 0; --i) {
-                            if (vals[i] < 26000) { base = vals[i]; break; }
-                        }
-                        int next = base * 2;
-                        if (next > 26000) next = 26000;
-                        next = (next / 50) * 50;
-                        if (next < 100) next = 100;
-                        vals[count] = next;
-                        SetMouseDpiStages(vals, count + 1, g_dpiWheel.selected);
+                        // 新增一档 → 进入输入模式，由用户填具体数值
+                        g_dpiInputMode = true;
+                        g_dpiInputText.clear();
+                        g_cursorVisible = true;
+                        g_dpiWheel.count = count + 1;
+                        g_dpiWheel.selected = count;
+                        SetTimer(hwnd, 4, 530, nullptr);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
                     } else {
                         if (count <= 1) return 0;
                         int active = g_dpiWheel.selected;
@@ -1180,6 +1188,9 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                                 : L"切换回报率失败，已回滚。",
                                 kAppTitle, MB_OK | MB_ICONWARNING);
                 }
+            } else if (wp == 4) {
+                g_cursorVisible = !g_cursorVisible;
+                InvalidateRect(hwnd, nullptr, FALSE);
             } else if (wp == 3) {
                 KillTimer(hwnd, 3);
                 g_pendingWrite = -1;
@@ -1194,7 +1205,53 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             return 0;
 
+        case WM_CHAR:
+            if (g_dpiInputMode) {
+                if (wp >= L'0' && wp <= L'9' && g_dpiInputText.size() < 5) {
+                    g_dpiInputText.push_back(static_cast<wchar_t>(wp));
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (wp == VK_BACK && !g_dpiInputText.empty()) {
+                    g_dpiInputText.pop_back();
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+                return 0;
+            }
+            break;
+
         case WM_KEYDOWN:
+            if (g_dpiInputMode) {
+                if (wp == VK_RETURN && !g_dpiInputText.empty()) {
+                    int v = static_cast<int>(wcstol(g_dpiInputText.c_str(), nullptr, 10));
+                    if (v < 100) v = 100;
+                    if (v > 26000) v = 26000;
+                    v = (v / 50) * 50;
+
+                    int count = g.mouseCfg.ok ? g.mouseCfg.dpiCount : 0;
+                    if (count >= 1 && count < 6) {
+                        int vals[6] = {};
+                        for (int i = 0; i < count; ++i) vals[i] = g.mouseCfg.dpiList[i];
+                        vals[count] = v;
+                        SetMouseDpiStages(vals, count + 1, count);
+                        if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
+                    }
+                    g_dpiInputMode = false;
+                    g_dpiInputText.clear();
+                    KillTimer(hwnd, 4);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                if (wp == VK_ESCAPE) {
+                    g_dpiInputMode = false;
+                    g_dpiInputText.clear();
+                    KillTimer(hwnd, 4);
+                    if (g.mouseCfg.ok) {
+                        g_dpiWheel.selected = (g.mouseCfg.dpiIndex >= 0) ? g.mouseCfg.dpiIndex : 0;
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                return 0;
+            }
             if (wp == VK_ESCAPE) {
                 if (g_view != ViewMode::Main) {
                     g_view = ViewMode::Main;
@@ -1218,7 +1275,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             // 设备是真相源：无拖动、无待写入时，滚轮跟随设备实际档位
             if (g_view == ViewMode::MouseDetail && g_dragWheel < 0 && g_pendingWrite < 0 &&
-                g.mouseCfg.ok) {
+                g.mouseCfg.ok && !g_dpiInputMode) {
                 const int d = g.mouseCfg.dpiIndex;
                 if (d >= 0 && d < g_dpiWheel.count && d != g_dpiWheel.selected) {
                     g_dpiWheel.selected = d;
