@@ -589,6 +589,7 @@ int g_dragStartY = 0;
 int g_dragStartSel = 0;
 int g_pendingWrite = -1;  // 0 = DPI, 1 = Rate
 bool g_dpiInputMode = false;      // 正在输入新 DPI
+int g_dpiInsertPos = -1;          // 新档插入位置（当前档的下一个）
 std::wstring g_dpiInputText;
 bool g_cursorVisible = true;
 
@@ -715,16 +716,18 @@ void OnPaintMouseDetail() {
     std::vector<std::wstring> dpiLabels;
     std::vector<std::wstring> rateLabels;
     const int stageCount = g.mouseCfg.ok ? g.mouseCfg.dpiCount : 0;
+    std::wstring inputLine;
+    if (g_dpiInputMode) {
+        inputLine = g_dpiInputText.empty() ? std::wstring(L"输入 DPI") : g_dpiInputText;
+        if (g_dpiInputText.empty() || g_cursorVisible) inputLine += L"|";
+    }
     for (int i = 0; i < stageCount; ++i) {
+        if (g_dpiInputMode && i == g_dpiInsertPos) dpiLabels.emplace_back(inputLine);
         wchar_t b[24];
         swprintf_s(b, L"%d", g.mouseCfg.dpiList[i]);
         dpiLabels.emplace_back(b);
     }
-    if (g_dpiInputMode) {
-        std::wstring line = g_dpiInputText.empty() ? std::wstring(L"输入 DPI") : g_dpiInputText;
-        if (g_dpiInputText.empty() || g_cursorVisible) line += L"|";
-        dpiLabels.emplace_back(line);
-    }
+    if (g_dpiInputMode && g_dpiInsertPos >= stageCount) dpiLabels.emplace_back(inputLine);
     for (int i = 0; i < kRateCount; ++i) {
         wchar_t b[24];
         swprintf_s(b, L"%d", kRateValues[i]);
@@ -1022,20 +1025,30 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
                     if (inPlus) {
                         if (count >= 6) return 0;
-                        // 新增一档 → 进入输入模式，由用户填具体数值
+                        // 新档插到当前档的下一个位置，等待用户填数值
                         g_dpiInputMode = true;
                         g_dpiInputText.clear();
                         g_cursorVisible = true;
+                        g_dpiInsertPos = g_dpiWheel.selected + 1;
+                        if (g_dpiInsertPos > count) g_dpiInsertPos = count;
                         g_dpiWheel.count = count + 1;
-                        g_dpiWheel.selected = count;
+                        g_dpiWheel.selected = g_dpiInsertPos;
                         SetTimer(hwnd, 4, 530, nullptr);
                         InvalidateRect(hwnd, nullptr, FALSE);
                         return 0;
                     } else {
+                        // 删掉当前档，活动档退回上一档
                         if (count <= 1) return 0;
-                        int active = g_dpiWheel.selected;
-                        if (active >= count - 1) active = count - 2;
-                        SetMouseDpiStages(vals, count - 1, active);
+                        int del = g_dpiWheel.selected;
+                        if (del < 0 || del >= count) del = count - 1;
+                        int kept[6];
+                        int n = 0;
+                        for (int i = 0; i < count; ++i) {
+                            if (i != del) kept[n++] = g.mouseCfg.dpiList[i];
+                        }
+                        int active = (del > 0) ? (del - 1) : 0;
+                        if (active >= n) active = n - 1;
+                        SetMouseDpiStages(kept, n, active);
                     }
                     if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
                     return 0;
@@ -1221,28 +1234,55 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_KEYDOWN:
             if (g_dpiInputMode) {
                 if (wp == VK_RETURN && !g_dpiInputText.empty()) {
-                    int v = static_cast<int>(wcstol(g_dpiInputText.c_str(), nullptr, 10));
+                    // 先落状态再写设备：写操作耗时数百 ms，期间若重入会重复插入
+                    const std::wstring typed = g_dpiInputText;
+                    const int pos = (g_dpiInsertPos >= 0) ? g_dpiInsertPos : -1;
+                    g_dpiInputMode = false;
+                    g_dpiInputText.clear();
+                    g_dpiInsertPos = -1;
+                    KillTimer(hwnd, 4);
+
+                    int v = static_cast<int>(wcstol(typed.c_str(), nullptr, 10));
                     if (v < 100) v = 100;
                     if (v > 26000) v = 26000;
                     v = (v / 50) * 50;
 
                     int count = g.mouseCfg.ok ? g.mouseCfg.dpiCount : 0;
                     if (count >= 1 && count < 6) {
-                        int vals[6] = {};
-                        for (int i = 0; i < count; ++i) vals[i] = g.mouseCfg.dpiList[i];
-                        vals[count] = v;
-                        SetMouseDpiStages(vals, count + 1, count);
+                        int insertAt = (pos >= 0 && pos <= count) ? pos : count;
+                        int vals[7];
+                        int n = 0;
+                        for (int i = 0; i < count; ++i) {
+                            if (i == insertAt) vals[n++] = v;
+                            vals[n++] = g.mouseCfg.dpiList[i];
+                        }
+                        if (insertAt >= count) vals[n++] = v;
+
+                        // 从小到大排序
+                        for (int i = 0; i < n - 1; ++i) {
+                            for (int j = i + 1; j < n; ++j) {
+                                if (vals[j] < vals[i]) {
+                                    const int t = vals[i];
+                                    vals[i] = vals[j];
+                                    vals[j] = t;
+                                }
+                            }
+                        }
+                        // 活动档指向刚输入的值
+                        int active = 0;
+                        for (int i = 0; i < n; ++i) {
+                            if (vals[i] == v) { active = i; break; }
+                        }
+                        SetMouseDpiStages(vals, n, active);
                         if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
                     }
-                    g_dpiInputMode = false;
-                    g_dpiInputText.clear();
-                    KillTimer(hwnd, 4);
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
                 if (wp == VK_ESCAPE) {
                     g_dpiInputMode = false;
                     g_dpiInputText.clear();
+                    g_dpiInsertPos = -1;
                     KillTimer(hwnd, 4);
                     if (g.mouseCfg.ok) {
                         g_dpiWheel.selected = (g.mouseCfg.dpiIndex >= 0) ? g.mouseCfg.dpiIndex : 0;
