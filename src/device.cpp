@@ -420,13 +420,16 @@ KeyboardLed ReadKeyboardLed() {
     for (int attempt = 0; attempt < 3; ++attempt) {
         if (!KbReadLedBlock(h, led)) { Sleep(120); continue; }
         const int m = led[0];
-        // 合法灯效模式：1..20 或 254
-        if ((m >= 1 && m <= 20) || m == 254) break;
+        // 合法：1..20（灯效）、254（心动时刻）、22（关闭态回显）。
+        // 不接受 0 —— 全 0 帧是噪声，不能误判成「关闭灯效」。
+        if ((m >= 1 && m <= 20) || m == 22 || m == 254) break;
         Sleep(120);
     }
-    if ((led[0] >= 1 && led[0] <= 20) || led[0] == 254) {
+    const int mode = led[0];
+    if ((mode >= 1 && mode <= 20) || mode == 22 || mode == 254) {
         k.ok = true;
-        k.mode = led[0];
+        // 实机：写入 mode=0 后设备稳定回显 0x16(22)，统一规范成 0 供 UI 回显
+        k.mode = (mode == 22) ? 0 : mode;
         k.r = led[1];
         k.g = led[2];
         k.b = led[3];
@@ -439,6 +442,11 @@ KeyboardLed ReadKeyboardLed() {
 }
 
 bool WriteKeyboardLed(int mode, int brightness, int speed) {
+    // 设备侧 mode 是单字节。必须先挡住越界值，否则 static_cast<BYTE> 会静默
+    // 截断：网页端的 UI 哨兵 9999 & 0xFF = 15，会把「关闭灯效」写成「涟漪扩散」。
+    // 合法集合：0（关闭）、1..20（灯效）、254（心动时刻）。
+    if (!((mode >= 0 && mode <= 20) || mode == 254)) return false;
+
     Iface it;
     if (!FindIface(kKbVid, kKbPid, kKbPage, kKbUsage, &it)) return false;
 

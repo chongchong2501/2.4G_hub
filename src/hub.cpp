@@ -871,7 +871,9 @@ Wheel g_brightWheel;
 Wheel g_speedWheel;
 
 // 灯效模式表（来自 E HUB i18n 的 huafenda 分组）
-const int kLedModeValues[21] = {9999, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+// 网页端「关闭灯效」的 9999 只是 UI 哨兵值，下发设备前必须转成 0：
+// 直接写 9999 会被 u8 截断成 0x0F = 15（涟漪扩散），这是曾经的误切换 bug。
+const int kLedModeValues[21] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
                                 11, 12, 13, 14, 15, 16, 17, 18, 19, 254};
 const wchar_t* kLedModeNames[21] = {
     L"关闭灯效", L"静态恒亮", L"按压点亮", L"释放熄灭", L"繁星点点", L"漫天飞雪",
