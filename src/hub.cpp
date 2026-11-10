@@ -189,6 +189,8 @@ struct UiLayout {
     RectL kbCard;
     RectL autostart;     // 开机自启勾选框
     RectL autostartHit;
+    RectL factoryBtn;    // 恢复出厂设置
+    RectL factoryHit;
 
     RectL dpiWheel;
     RectL rateWheel;
@@ -221,6 +223,10 @@ void InitLayout() {
     L.kbCard    = {cardX + cardW + cardGap, 72, cardW, cardH};
     L.autostart = {cardX + 4, L.foot.y + 5, 18, 18};
     L.autostartHit = {cardX, L.foot.y, 140, L.foot.h};
+    // 恢复出厂设置：底部右侧，右边缘贴安全边距
+    L.factoryBtn = {kCanvasW - kPadX - 96, L.foot.y, 96, L.foot.h};
+    L.factoryHit = {L.factoryBtn.x - 8, L.factoryBtn.y - 4,
+                    L.factoryBtn.w + 16, L.factoryBtn.h + 8};
 
     // 鼠标详情：两个 248 × 176 滚轮，间隙 56，水平居中 → 左右各留 104
     // 旧布局左右 88、中间 144，两个滚轮被推到两侧、视觉上"不聚拢"
@@ -902,6 +908,10 @@ void OnPaintMain() {
                     kTextDim, kLeft, kMiddle);
     DrawTextAligned(L"点击设备卡片进入设置　·　Esc 关闭", g.fmtSmall,
                     R(L.foot), kTextDim, kCenter, kMiddle);
+
+    // 恢复出厂设置：底部右侧，低调底色 + 次要文字，点击后有二次确认
+    FillRound(R(L.factoryBtn), 7, D2D1::ColorF(0.155f, 0.165f, 0.185f));
+    DrawTextAligned(L"恢复出厂设置", g.fmtSmall, R(L.factoryBtn), kTextDim, kCenter, kMiddle);
 }
 
 void OnPaintMouseDetail() {
@@ -1062,6 +1072,47 @@ void HidePanel() {
     // 真正隐藏：任务栏不留窗口按钮，电量由托盘图标表达
     ShowWindow(g.panel, SW_HIDE);
     g.panelVisible = false;
+}
+
+// 恢复出厂默认：只重置本工具可写的项，二次确认后执行。
+// 设备侧没有可用的 ResetFactory 命令（0xFF59 通道返回固定帧），
+// 因此这里走已验证的写入路径，不做无法兑现的承诺。
+void DoFactoryReset(HWND hwnd) {
+    const bool mouseUp = g.mouseConnected || g.reading.mousePresent;
+    const bool kbUp = g.kbConnected || g.reading.kbPresent;
+    if (!mouseUp && !kbUp) {
+        MessageBoxW(hwnd, L"未检测到可用的鼠标或键盘接口。", L"恢复出厂设置",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const int r = MessageBoxW(
+        hwnd,
+        L"将把本工具可写的设置恢复为出厂默认：\n\n"
+        L"· 鼠标 DPI：六档恢复为 400 / 800 / 1600 / 3200 / 6400 / 26000，活动档 800\n"
+        L"· 键盘灯效：恢复为「静态恒亮」白色，亮度 5、速度 5\n\n"
+        L"按键映射、宏、回报率等本工具未修改的内容不受影响。\n\n"
+        L"是否继续？",
+        L"恢复出厂设置", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+    if (r != IDYES) return;
+
+    const bool mouseDone = mouseUp ? ResetMouseToFactory() : false;
+    const bool kbDone = kbUp ? ResetKeyboardToFactory() : false;
+
+    if (g.wakeEvent != nullptr) SetEvent(g.wakeEvent);
+    SyncWheels();
+    SyncKbWheels();
+    InvalidateRect(hwnd, nullptr, FALSE);
+
+    const wchar_t* msg = L"恢复失败：设备未响应，已保持原设置。";
+    if (mouseDone && kbDone) {
+        msg = L"鼠标与键盘均已恢复为出厂默认。";
+    } else if (mouseDone) {
+        msg = L"鼠标已恢复；键盘写入失败，请确认键盘已连接。";
+    } else if (kbDone) {
+        msg = L"键盘已恢复；鼠标写入失败，请移动鼠标唤醒后重试。";
+    }
+    MessageBoxW(hwnd, msg, L"恢复出厂设置", MB_OK | MB_ICONINFORMATION);
 }
 
 // ---------- 设备工作线程 ----------
@@ -1284,6 +1335,11 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     ApplyAutoStart(g.autostart);
                     SaveConfig();
                     InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                // 恢复出厂设置（带二次确认）
+                if (Hit(pt, L.factoryHit)) {
+                    DoFactoryReset(hwnd);
                     return 0;
                 }
                 if (Hit(pt, L.mouseCard)) {

@@ -79,5 +79,14 @@ bool WriteMouseDpi(int activeIndex);
 // 设置 DPI 档位列表（1..6 档）与活动档，用于增删档位
 bool SetMouseDpiStages(const int* values, int count, int activeIndex);
 
+// ---------- 恢复出厂默认 ----------
+//
+// 只重置本工具暴露且能确认出厂值的项，不触碰按键映射、宏、回报率等
+// 未在本工具修改的字段（设备侧也没有可用的 ResetFactory 命令）。
+//   鼠标：DPI 六档恢复为 400/800/1600/3200/6400/26000，活动档 800
+//   键盘：灯效恢复为「静态恒亮」白色，亮度 5、速度 5
+bool ResetMouseToFactory();
+bool ResetKeyboardToFactory();
+
 // 备份文件路径
 std::wstring MouseBackupPath(const std::wstring& configDir);

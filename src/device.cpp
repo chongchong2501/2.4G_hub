@@ -656,6 +656,77 @@ bool SetMouseDpiStages(const int* values, int count, int activeIndex) {
     return ok;
 }
 
+// ---------- 恢复出厂默认 ----------
+
+namespace {
+// MCHOSE 出厂预设的六档 DPI（见 docs/MCHOSE-协议参考.md）
+constexpr int kFactoryDpi[6] = {400, 800, 1600, 3200, 6400, 26000};
+constexpr int kFactoryDpiActive = 1;  // 800 DPI
+}  // namespace
+
+bool ResetMouseToFactory() {
+    std::vector<BYTE> cfg;
+    if (!ReadMouseConfigRaw(&cfg) || cfg.size() < 0x3F) return false;  // 写前必读
+
+    // +04..+0F：X 轴六档 DPI（u16 小端）
+    // +33..+3E：Y 轴六档 DPI —— 必须同步写，否则设备会自动对齐 Y 轴，
+    //           导致写后逐字节校验不通过（实际已写入，但返回 false）
+    // +10：启用档数；+02 低 nibble：活动 DPI 档
+    for (int i = 0; i < 6; ++i) {
+        cfg[4 + i * 2] = static_cast<BYTE>(kFactoryDpi[i] & 0xFF);
+        cfg[5 + i * 2] = static_cast<BYTE>((kFactoryDpi[i] >> 8) & 0xFF);
+        cfg[0x33 + i * 2] = static_cast<BYTE>(kFactoryDpi[i] & 0xFF);
+        cfg[0x34 + i * 2] = static_cast<BYTE>((kFactoryDpi[i] >> 8) & 0xFF);
+    }
+    cfg[0x10] = 6;
+    cfg[2] = static_cast<BYTE>((cfg[2] & 0xF0) | kFactoryDpiActive);
+
+    if (!WriteMouseConfigRaw(cfg)) return false;
+
+    // 回读确认：只比 DPI 区与档数，容忍 +03 / sensor 的硬件自维护差异
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        Sleep(120);
+        std::vector<BYTE> back;
+        if (!ReadMouseConfigRaw(&back) || back.size() < 0x11) continue;
+        bool same = (back[0x10] == 6);
+        for (int i = 0; same && i < 6; ++i) {
+            const int got = back[4 + i * 2] | (back[5 + i * 2] << 8);
+            if (got != kFactoryDpi[i]) same = false;
+        }
+        if (same) return true;
+    }
+    return false;
+}
+
+bool ResetKeyboardToFactory() {
+    Iface it;
+    if (!FindIface(kKbVid, kKbPid, kKbPage, kKbUsage, &it)) return false;
+
+    HANDLE h = CreateFileW(it.path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    BYTE led[16] = {};
+    if (!KbReadLedBlock(h, led)) {  // 写前必读，副色/colorMode 保持原值
+        CloseHandle(h);
+        return false;
+    }
+
+    led[0] = 1;                                 // 静态恒亮
+    led[1] = 255; led[2] = 255; led[3] = 255;   // 白色
+    led[4] = 255;                               // 写入固定值
+    led[9] = 5;                                 // 亮度
+    led[10] = 5;                                // 速度
+    led[14] = 0xAA;
+    led[15] = 0x55;
+
+    // 灯效是动态的，读回值不可靠，只确认写入被接受
+    const bool ok = KbWriteLedBlock(h, led);
+    CloseHandle(h);
+    return ok;
+}
+
 bool RestoreMouseConfig(const std::wstring& configDir) {
     const std::wstring path = MouseBackupPath(configDir);
     HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
