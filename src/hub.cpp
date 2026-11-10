@@ -81,6 +81,12 @@ constexpr int IDM_RATE_BASE = 2100;
 const int kRateValues[6] = {125, 500, 1000, 0, 0, 0};
 constexpr int kRateCount = 3;
 
+// 统一逻辑画布：所有 UI 坐标都以 760 × 360 为基准，S() 再按 DPI 映射到物理像素。
+// 窗口物理尺寸 = kCanvasW/H × dpi/96，保证"居中"在任何缩放下都是真居中。
+constexpr float kCanvasW = 760.0f;
+constexpr float kCanvasH = 360.0f;
+constexpr float kPadX = 28.0f;
+
 // §4.5 色板
 const D2D1_COLOR_F kBg = D2D1::ColorF(0x1B1D21);
 const D2D1_COLOR_F kCard = D2D1::ColorF(0x24262B);
@@ -101,8 +107,10 @@ struct AppState {
     UINT taskbarCreated = 0;
     bool exiting = false;
     bool panelVisible = false;
-    bool sizeAdjusted = false;
     UINT dpi = 96;
+    // 绘制缩放由实际客户区尺寸推导，绘制与鼠标命中始终基于同一套坐标。
+    float scale = 1.0f;
+    float fontScale = 0.0f;
 
     // 设备数据（由工作线程读取，UI 线程消费）
     int mouseBattery = -1;
@@ -119,8 +127,8 @@ struct AppState {
     // 配置
     int winX = -1;
     int winY = -1;
-    int winW = 760;
-    int winH = 360;
+    int winW = static_cast<int>(kCanvasW);
+    int winH = static_cast<int>(kCanvasH);
     bool autostart = false;
     int lowBattery = 15;
     std::wstring configDir;
@@ -141,7 +149,120 @@ struct AppState {
 
 AppState g;
 
-float S(float v) { return v * static_cast<float>(g.dpi) / 96.0f; }
+// 逻辑坐标 → 物理像素。缩放取自渲染目标的实际尺寸，绘制与命中判定共用。
+float S(float v) { return v * g.scale; }
+
+// 缩放只认 GetClientRect 这个真实物理尺寸，不用 render target 自报的
+// GetSize()（DIP 单位，受 rt DPI 影响），保证绘制与命中判定完全对齐。
+void UpdateScale() {
+    RECT rc{};
+    GetClientRect(g.panel, &rc);
+    const float w = static_cast<float>(rc.right - rc.left);
+    const float h = static_cast<float>(rc.bottom - rc.top);
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float sx = w / kCanvasW;
+    const float sy = h / kCanvasH;
+    g.scale = (sx < sy) ? sx : sy;
+}
+
+// ---------- 统一布局：单一坐标源 ----------
+//
+// 每个界面元素只在这里定义一次，绘制与鼠标命中都读同一份 RectL，
+// 杜绝"画在 A 处、点击判定在 B 处"。所有数值均为逻辑坐标。
+
+struct RectL {
+    float x = 0.0f;
+    float y = 0.0f;
+    float w = 0.0f;
+    float h = 0.0f;
+};
+
+struct UiLayout {
+    RectL back;          // 详情页返回按钮
+    RectL backHit;       // 返回按钮命中区（略放大）
+    RectL close;         // 主面板关闭按钮
+    RectL closeHit;
+    RectL title;         // 顶栏标题
+    RectL status;        // 顶栏右侧状态（右对齐）
+    RectL foot;          // 底部信息条
+
+    RectL mouseCard;
+    RectL kbCard;
+    RectL autostart;     // 开机自启勾选框
+    RectL autostartHit;
+
+    RectL dpiWheel;
+    RectL rateWheel;
+    RectL plusBtn;
+    RectL minusBtn;
+
+    RectL modeWheel;
+    RectL brightWheel;
+    RectL speedWheel;
+};
+
+UiLayout L;
+
+void InitLayout() {
+    // 顶栏：按钮垂直居中，右侧状态贴 kCanvasW - kPadX
+    L.back   = {kPadX, 16, 32, 32};
+    L.backHit = {kPadX - 4, 12, 40, 40};
+    L.close  = {kCanvasW - kPadX - 28, 16, 28, 28};
+    L.closeHit = {kCanvasW - kPadX - 36, 8, 44, 44};
+    L.title  = {72, 14, 440, 36};
+    L.status = {kCanvasW - kPadX - 200, 16, 200, 32};
+    L.foot   = {kPadX, 306, kCanvasW - kPadX * 2.0f, 28};
+
+    // 主面板：两张 342 × 200 卡片，间隙 16，整体水平居中 → 左右各留 30
+    const float cardW = 342.0f;
+    const float cardH = 200.0f;
+    const float cardGap = 16.0f;
+    const float cardX = (kCanvasW - (cardW * 2.0f + cardGap)) * 0.5f;
+    L.mouseCard = {cardX, 72, cardW, cardH};
+    L.kbCard    = {cardX + cardW + cardGap, 72, cardW, cardH};
+    L.autostart = {cardX + 4, L.foot.y + 5, 18, 18};
+    L.autostartHit = {cardX, L.foot.y, 140, L.foot.h};
+
+    // 鼠标详情：两个 248 × 176 滚轮，间隙 56，水平居中 → 左右各留 104
+    // 旧布局左右 88、中间 144，两个滚轮被推到两侧、视觉上"不聚拢"
+    const float mwW = 248.0f;
+    const float mwH = 176.0f;
+    const float mwGap = 56.0f;
+    const float mwX = (kCanvasW - (mwW * 2.0f + mwGap)) * 0.5f;
+    L.dpiWheel  = {mwX, 100, mwW, mwH};
+    L.rateWheel = {mwX + mwW + mwGap, 100, mwW, mwH};
+
+    // 增删按钮组在 DPI 滚轮正下方、与其中心线对齐
+    const float btnW = 56.0f;
+    const float btnH = 28.0f;
+    const float btnGap = 12.0f;
+    const float btnX = mwX + (mwW - (btnW * 2.0f + btnGap)) * 0.5f;
+    L.plusBtn  = {btnX, 292, btnW, btnH};
+    L.minusBtn = {btnX + btnW + btnGap, 292, btnW, btnH};
+
+    // 键盘详情：288 + 150 + 150，间隙 20，水平居中 → 左右各留 66
+    // 旧布局从 x=24 起、右边缘只到 674，整体比窗口中心偏左 31px
+    const float kwGap = 20.0f;
+    const float kwTotal = 288.0f + kwGap + 150.0f + kwGap + 150.0f;
+    const float kwX = (kCanvasW - kwTotal) * 0.5f;
+    L.modeWheel   = {kwX, 100, 288, 186};
+    L.brightWheel = {kwX + 288.0f + kwGap, 100, 150, 186};
+    L.speedWheel  = {kwX + 288.0f + kwGap + 150.0f + kwGap, 100, 150, 186};
+}
+
+// 逻辑矩形 → 物理像素矩形（render target 固定 96 DPI，1 单位 = 1 物理像素）
+D2D1_RECT_F R(const RectL& r) {
+    return D2D1::RectF(S(r.x), S(r.y), S(r.x + r.w), S(r.y + r.h));
+}
+D2D1_RECT_F R(float x, float y, float w, float h) {
+    return D2D1::RectF(S(x), S(y), S(x + w), S(y + h));
+}
+
+// 客户区物理坐标是否落在逻辑矩形内
+bool Hit(POINT pt, const RectL& r) {
+    return pt.x >= static_cast<LONG>(S(r.x)) && pt.x <= static_cast<LONG>(S(r.x + r.w)) &&
+           pt.y >= static_cast<LONG>(S(r.y)) && pt.y <= static_cast<LONG>(S(r.y + r.h));
+}
 
 int RateHz(int index) {
     static const int kRates[] = {125, 500, 1000, 2000, 4000, 8000};
@@ -615,7 +736,7 @@ bool CreateTextFormats() {
     };
     for (const Spec& s : specs) {
         if (*s.dst != nullptr) { (*s.dst)->Release(); *s.dst = nullptr; }
-        const float px = s.size * static_cast<float>(g.dpi) / 96.0f;
+        const float px = s.size * g.scale;
         HRESULT hr = g.dw->CreateTextFormat(L"Segoe UI", nullptr, s.weight,
                                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                             px, L"zh-CN", s.dst);
@@ -634,11 +755,16 @@ void DiscardDeviceResources() {
 }
 
 bool CreateDeviceResources() {
-    if (g.rt != nullptr) return true;
     RECT rc{};
     GetClientRect(g.panel, &rc);
-    D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+    const D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
     if (size.width == 0 || size.height == 0) return false;
+    if (g.rt != nullptr) {
+        // 窗口尺寸可能被 DPI 通知改动，这里按客户区同步一次（相同则跳过）
+        const D2D1_SIZE_U cur = g.rt->GetPixelSize();
+        if (cur.width != size.width || cur.height != size.height) g.rt->Resize(size);
+        return true;
+    }
     HRESULT hr = g.d2d->CreateHwndRenderTarget(
         D2D1::RenderTargetProperties(),
         D2D1::HwndRenderTargetProperties(g.panel, size), &g.rt);
@@ -656,6 +782,27 @@ void DrawTextAt(const wchar_t* text, IDWriteTextFormat* fmt, const D2D1_RECT_F& 
     }
 }
 
+// 文字在矩形内按指定方式对齐。临时改 format 属性、画完还原，
+// 不污染其他复用同一 format 的绘制点（滚轮格式本身已居中）。
+void DrawTextAligned(const wchar_t* text, IDWriteTextFormat* fmt, const D2D1_RECT_F& rc,
+                     const D2D1_COLOR_F& color,
+                     DWRITE_TEXT_ALIGNMENT h = DWRITE_TEXT_ALIGNMENT_LEADING,
+                     DWRITE_PARAGRAPH_ALIGNMENT v = DWRITE_PARAGRAPH_ALIGNMENT_CENTER) {
+    if (fmt == nullptr) return;
+    const DWRITE_TEXT_ALIGNMENT oldH = fmt->GetTextAlignment();
+    const DWRITE_PARAGRAPH_ALIGNMENT oldV = fmt->GetParagraphAlignment();
+    fmt->SetTextAlignment(h);
+    fmt->SetParagraphAlignment(v);
+    DrawTextAt(text, fmt, rc, color);
+    fmt->SetTextAlignment(oldH);
+    fmt->SetParagraphAlignment(oldV);
+}
+
+constexpr DWRITE_TEXT_ALIGNMENT kLeft = DWRITE_TEXT_ALIGNMENT_LEADING;
+constexpr DWRITE_TEXT_ALIGNMENT kCenter = DWRITE_TEXT_ALIGNMENT_CENTER;
+constexpr DWRITE_TEXT_ALIGNMENT kRight = DWRITE_TEXT_ALIGNMENT_TRAILING;
+constexpr DWRITE_PARAGRAPH_ALIGNMENT kMiddle = DWRITE_PARAGRAPH_ALIGNMENT_CENTER;
+
 void FillRound(const D2D1_RECT_F& rc, float radius, const D2D1_COLOR_F& color) {
     ID2D1SolidColorBrush* brush = nullptr;
     if (SUCCEEDED(g.rt->CreateSolidColorBrush(color, &brush))) {
@@ -665,15 +812,17 @@ void FillRound(const D2D1_RECT_F& rc, float radius, const D2D1_COLOR_F& color) {
     }
 }
 
-void DrawCard(float x, float y, float w, float h, const wchar_t* name, const wchar_t* model,
+void DrawCard(const RectL& c, const wchar_t* name, const wchar_t* model,
               const wchar_t* link, const wchar_t* valueOverride, int battery, bool connected) {
-    D2D1_RECT_F card = D2D1::RectF(S(x), S(y), S(x + w), S(y + h));
-    FillRound(card, 12, kCard);
+    FillRound(R(c), 12, kCard);
 
-    DrawTextAt(name, g.fmtTitle, D2D1::RectF(S(x + 16), S(y + 16), S(x + w - 16), S(y + 38)),
-               kText);
-    DrawTextAt(link, g.fmtSmall, D2D1::RectF(S(x + 16), S(y + 38), S(x + w - 16), S(y + 56)),
-               kTextDim);
+    const float pad = 20.0f;
+    const float innerW = c.w - pad * 2.0f;
+
+    DrawTextAligned(name, g.fmtTitle, R(c.x + pad, c.y + 18, innerW, 26), kText,
+                    kLeft, kMiddle);
+    DrawTextAligned(link, g.fmtSmall, R(c.x + pad, c.y + 46, innerW, 20), kTextDim,
+                    kLeft, kMiddle);
 
     wchar_t val[32] = L"--";
     if (valueOverride != nullptr) {
@@ -685,21 +834,19 @@ void DrawCard(float x, float y, float w, float h, const wchar_t* name, const wch
     } else {
         wcscpy_s(val, L"未知");
     }
-    DrawTextAt(val, g.fmtValue, D2D1::RectF(S(x + 16), S(y + 70), S(x + w - 16), S(y + 112)),
-               connected ? kText : kTextDim);
+    DrawTextAligned(val, g.fmtValue, R(c.x + pad, c.y + 74, innerW, 44),
+                    connected ? kText : kTextDim, kLeft, kMiddle);
+    DrawTextAligned(model, g.fmtSmall, R(c.x + pad, c.y + 122, innerW, 20), kTextDim,
+                    kLeft, kMiddle);
 
-    DrawTextAt(model, g.fmtSmall, D2D1::RectF(S(x + 16), S(y + 112), S(x + w - 16), S(y + 130)),
-               kTextDim);
-
-    // 电量条
-    float barW = w - 32;
-    D2D1_RECT_F track = D2D1::RectF(S(x + 16), S(y + h - 32), S(x + 16 + barW), S(y + h - 26));
-    FillRound(track, 3, kLine);
+    // 电量条贴卡片底部，左右对称留 pad；半径按条高的一半
+    const float barY = c.y + c.h - 34.0f;
+    FillRound(R(c.x + pad, barY, innerW, 6), 3, kLine);
     if (connected && battery > 0) {
-        float pct = battery > 100 ? 1.0f : battery / 100.0f;
-        D2D1_RECT_F fill = D2D1::RectF(S(x + 16), S(y + h - 32),
-                                       S(x + 16 + barW * pct), S(y + h - 26));
-        FillRound(fill, 3, battery < 20 ? kBad : (battery < 50 ? kWarn : kAccent));
+        const float pct = battery > 100 ? 1.0f : battery / 100.0f;
+        const float fillW = innerW * pct;
+        FillRound(R(c.x + pad, barY, fillW, 6), std::fmin(3.0f, fillW * 0.5f),
+                  battery < 20 ? kBad : (battery < 50 ? kWarn : kAccent));
     }
 }
 
@@ -752,20 +899,25 @@ D2D1_COLOR_F AlphaText(float alpha) {
     return D2D1::ColorF(0.902f, 0.910f, 0.922f, alpha);
 }
 
+// 命中判定与绘制共用同一份滚轮矩形
+bool HitWheel(POINT pt, const Wheel& wh) {
+    return Hit(pt, RectL{wh.x, wh.y, wh.w, wh.h});
+}
+
 // 时钟式滚轮：中间选中项最大最亮，上下各两行逐级缩小变淡
 void DrawWheel(const Wheel& wh, const std::vector<std::wstring>& labels, const wchar_t* title) {
-    const D2D1_RECT_F card = D2D1::RectF(S(wh.x), S(wh.y), S(wh.x + wh.w), S(wh.y + wh.h));
-    FillRound(card, 14, kCard);
+    FillRound(R(wh.x, wh.y, wh.w, wh.h), 14, kCard);
 
-    DrawTextAt(title, g.fmtSmall,
-               D2D1::RectF(S(wh.x + 18), S(wh.y - 26), S(wh.x + wh.w - 18), S(wh.y - 6)), kTextDim);
+    // 标题居中在卡片正上方
+    DrawTextAligned(title, g.fmtSmall, R(wh.x, wh.y - 30, wh.w, 24), kTextDim,
+                    kCenter, kMiddle);
 
     const float cy = wh.y + wh.h * 0.5f;
     const float itemH = 34.0f;
 
-    // 选中行的底衬
-    FillRound(D2D1::RectF(S(wh.x + 12), S(cy - itemH * 0.5f), S(wh.x + wh.w - 12), S(cy + itemH * 0.5f)),
-              9, D2D1::ColorF(0.155f, 0.165f, 0.185f));
+    // 选中行的底衬，左右对称
+    FillRound(R(wh.x + 12, cy - itemH * 0.5f, wh.w - 24, itemH), 9,
+              D2D1::ColorF(0.155f, 0.165f, 0.185f));
 
     for (int d = -2; d <= 2; ++d) {
         const int idx = wh.selected + d;
@@ -775,15 +927,15 @@ void DrawWheel(const Wheel& wh, const std::vector<std::wstring>& labels, const w
         const float alpha = (d == 0) ? 1.0f : ((d == 1 || d == -1) ? 0.42f : 0.16f);
         IDWriteTextFormat* fmt = (d == 0) ? g.fmtWheelBig
                                           : ((d == 1 || d == -1) ? g.fmtWheelMid : g.fmtWheelSmall);
-        DrawTextAt(labels[idx].c_str(), fmt,
-                   D2D1::RectF(S(wh.x), S(y - itemH * 0.5f), S(wh.x + wh.w), S(y + itemH * 0.5f)),
-                   AlphaText(alpha));
+        DrawTextAligned(labels[idx].c_str(), fmt,
+                        R(wh.x, y - itemH * 0.5f, wh.w, itemH),
+                        AlphaText(alpha), kCenter, kMiddle);
     }
 }
 
 void DrawBackButton() {
-    FillRound(D2D1::RectF(S(24), S(16), S(56), S(48)), 8, kCard);
-    DrawTextAt(L"←", g.fmtHead, D2D1::RectF(S(28), S(18), S(56), S(46)), kText);
+    FillRound(R(L.back), 8, kCard);
+    DrawTextAligned(L"←", g.fmtHead, R(L.back), kText, kCenter, kMiddle);
 }
 
 Wheel* WheelById(int id) {
@@ -796,19 +948,20 @@ Wheel* WheelById(int id) {
     }
 }
 
+void PlaceWheel(Wheel& wh, const RectL& r) {
+    wh.x = r.x;
+    wh.y = r.y;
+    wh.w = r.w;
+    wh.h = r.h;
+}
+
 void SyncWheels() {
-    g_dpiWheel.x = 88.0f;
-    g_dpiWheel.y = 112.0f;
-    g_dpiWheel.w = 220.0f;
-    g_dpiWheel.h = 170.0f;
+    PlaceWheel(g_dpiWheel, L.dpiWheel);
     g_dpiWheel.count = (g.mouseCfg.ok && g.mouseCfg.dpiCount > 0) ? g.mouseCfg.dpiCount : 6;
     g_dpiWheel.selected = (g.mouseCfg.ok && g.mouseCfg.dpiIndex >= 0) ? g.mouseCfg.dpiIndex : 0;
     if (g_dpiWheel.selected >= g_dpiWheel.count) g_dpiWheel.selected = g_dpiWheel.count - 1;
 
-    g_rateWheel.x = 452.0f;
-    g_rateWheel.y = 112.0f;
-    g_rateWheel.w = 220.0f;
-    g_rateWheel.h = 170.0f;
+    PlaceWheel(g_rateWheel, L.rateWheel);
     g_rateWheel.count = kRateCount;
     g_rateWheel.selected = (g.mouseCfg.ok && g.mouseCfg.rateIndex >= 0) ? g.mouseCfg.rateIndex : 0;
     if (g_rateWheel.selected >= kRateCount) g_rateWheel.selected = kRateCount - 1;
@@ -817,12 +970,8 @@ void SyncWheels() {
 // ---------- 三个视图 ----------
 
 void OnPaintMain() {
-    DrawTextAt(L"设备中心", g.fmtHead, D2D1::RectF(S(24), S(20), S(400), S(48)), kText);
-    DrawTextAt(g.portable ? L"便携模式" : L"降级存储", g.fmtSmall,
-               D2D1::RectF(S(560), S(26), S(720), S(44)), kTextDim);
-
-    const float cardW = 350.0f;
-    const float cardH = 200.0f;
+    DrawTextAligned(L"设备中心", g.fmtHead, R(L.title), kText, kLeft, kMiddle);
+    DrawTextAligned(L"×", g.fmtHead, R(L.close), kTextDim, kCenter, kMiddle);
 
     wchar_t mouseCfgText[64] = L"MCHOSE A7 Pro";
     if (g.mouseCfg.ok && g.mouseCfg.dpiIndex >= 0 && g.mouseCfg.dpiIndex < 6) {
@@ -838,36 +987,34 @@ void OnPaintMain() {
     }
 
     const bool mouseSleep = !g.mouseConnected && g.reading.mousePresent;
-    DrawCard(24, 64, cardW, cardH, L"鼠标", mouseCfgText,
+    DrawCard(L.mouseCard, L"鼠标", mouseCfgText,
              g.mouseConnected ? L"2.4G · 已连接" : (mouseSleep ? L"移动鼠标唤醒" : L"未插入接收器"),
              g.mouseConnected ? nullptr : (mouseSleep ? L"无响应" : L"未连接"),
              g.mouseBattery, g.mouseConnected);
 
     const bool kbSleep = !g.kbConnected && g.reading.kbPresent;
-    DrawCard(386, 64, cardW, cardH, L"键盘",
+    DrawCard(L.kbCard, L"键盘",
              g.kbConnected ? L"EWEADN X87" : (kbSleep ? L"敲击任意键唤醒" : L"请确认已开机"),
              g.kbConnected ? L"2.4G · 已连接" : (kbSleep ? L"休眠中" : L"未检测到设备"),
              g.kbConnected ? nullptr : (kbSleep ? L"休眠" : L"未连接"),
              g.kbBattery, g.kbConnected);
 
-    DrawTextAt(L"×", g.fmtHead, D2D1::RectF(S(716), S(18), S(744), S(46)), kTextDim);
-
-    // 开机自启勾选框
-    FillRound(D2D1::RectF(S(24), S(288), S(42), S(306)), 4,
+    // 底部条：勾选框靠左、提示居中，两者基线一致
+    FillRound(R(L.autostart), 4,
               g.autostart ? D2D1::ColorF(0.36f, 0.66f, 0.20f) : kCard);
     if (g.autostart) {
-        DrawTextAt(L"✓", g.fmtSmall, D2D1::RectF(S(24), S(286), S(42), S(308)), kText);
+        DrawTextAligned(L"✓", g.fmtSmall, R(L.autostart), kText, kCenter, kMiddle);
     }
-    DrawTextAt(L"开机自启", g.fmtSmall, D2D1::RectF(S(48), S(286), S(140), S(308)), kTextDim);
-
-    DrawTextAt(L"点击设备卡片进入设置　·　Esc 关闭", g.fmtSmall,
-               D2D1::RectF(S(160), S(288), S(736), S(308)), kTextDim);
+    DrawTextAligned(L"开机自启", g.fmtSmall,
+                    R(L.autostart.x + L.autostart.w + 8, L.foot.y, 90, L.foot.h),
+                    kTextDim, kLeft, kMiddle);
+    DrawTextAligned(L"点击设备卡片进入设置　·　Esc 关闭", g.fmtSmall,
+                    R(L.foot), kTextDim, kCenter, kMiddle);
 }
 
 void OnPaintMouseDetail() {
     DrawBackButton();
-    DrawTextAt(L"鼠标 · MCHOSE A7 Pro", g.fmtHead,
-               D2D1::RectF(S(70), S(20), S(480), S(46)), kText);
+    DrawTextAligned(L"鼠标 · MCHOSE A7 Pro", g.fmtHead, R(L.title), kText, kLeft, kMiddle);
 
     wchar_t status[64];
     if (g.mouseConnected) {
@@ -875,7 +1022,7 @@ void OnPaintMouseDetail() {
     } else {
         wcscpy_s(status, L"离线");
     }
-    DrawTextAt(status, g.fmtSmall, D2D1::RectF(S(600), S(24), S(736), S(44)), kTextDim);
+    DrawTextAligned(status, g.fmtSmall, R(L.status), kTextDim, kRight, kMiddle);
 
     std::vector<std::wstring> dpiLabels;
     std::vector<std::wstring> rateLabels;
@@ -901,39 +1048,31 @@ void OnPaintMouseDetail() {
     DrawWheel(g_dpiWheel, dpiLabels, L"DPI");
     DrawWheel(g_rateWheel, rateLabels, L"回报率（Hz）");
 
-    // DPI 档位增删按钮
-    FillRound(D2D1::RectF(S(132), S(288), S(192), S(314)), 8,
-              D2D1::ColorF(0.175f, 0.185f, 0.205f));
-    FillRound(D2D1::RectF(S(204), S(288), S(264), S(314)), 8,
-              D2D1::ColorF(0.175f, 0.185f, 0.205f));
-    DrawTextAt(L"+", g.fmtWheelMid, D2D1::RectF(S(132), S(288), S(192), S(314)), kText);
-    DrawTextAt(L"−", g.fmtWheelMid, D2D1::RectF(S(204), S(288), S(264), S(314)), kText);
+    // DPI 档位增删按钮：紧贴 DPI 滚轮下方并与其中心线对齐
+    FillRound(R(L.plusBtn), 8, D2D1::ColorF(0.175f, 0.185f, 0.205f));
+    FillRound(R(L.minusBtn), 8, D2D1::ColorF(0.175f, 0.185f, 0.205f));
+    DrawTextAligned(L"+", g.fmtWheelMid, R(L.plusBtn), kText, kCenter, kMiddle);
+    DrawTextAligned(L"−", g.fmtWheelMid, R(L.minusBtn), kText, kCenter, kMiddle);
 
-    DrawTextAt(L"滚轮选择　·　+ / − 增删档位　·　松开后自动应用", g.fmtSmall,
-               D2D1::RectF(S(300), S(292), S(736), S(312)), kTextDim);
+    // 提示右对齐到右边距，左边界让开 +/− 按钮组，避免长文案被 CLIP 裁掉开头
+    const float hintX = L.minusBtn.x + L.minusBtn.w + 20.0f;
+    DrawTextAligned(L"滚轮选择　·　+ / − 增删档位　·　松开后自动应用", g.fmtSmall,
+                    R(hintX, L.plusBtn.y, kCanvasW - kPadX - hintX, L.plusBtn.h),
+                    kTextDim, kRight, kMiddle);
 }
 
 void SyncKbWheels() {
-    g_modeWheel.x = 24.0f;
-    g_modeWheel.y = 108.0f;
-    g_modeWheel.w = 300.0f;
-    g_modeWheel.h = 190.0f;
+    PlaceWheel(g_modeWheel, L.modeWheel);
     g_modeWheel.count = kLedModeCount;
     g_modeWheel.selected = LedModeIndex(g.kbLed.ok ? g.kbLed.mode : 1);
 
-    g_brightWheel.x = 350.0f;
-    g_brightWheel.y = 108.0f;
-    g_brightWheel.w = 150.0f;
-    g_brightWheel.h = 190.0f;
+    PlaceWheel(g_brightWheel, L.brightWheel);
     g_brightWheel.count = 6;
     g_brightWheel.selected = g.kbLed.ok ? g.kbLed.brightness : 0;
     if (g_brightWheel.selected < 0) g_brightWheel.selected = 0;
     if (g_brightWheel.selected > 5) g_brightWheel.selected = 5;
 
-    g_speedWheel.x = 524.0f;
-    g_speedWheel.y = 108.0f;
-    g_speedWheel.w = 150.0f;
-    g_speedWheel.h = 190.0f;
+    PlaceWheel(g_speedWheel, L.speedWheel);
     g_speedWheel.count = 6;
     g_speedWheel.selected = g.kbLed.ok ? g.kbLed.speed : 0;
     if (g_speedWheel.selected < 0) g_speedWheel.selected = 0;
@@ -942,8 +1081,7 @@ void SyncKbWheels() {
 
 void OnPaintKbDetail() {
     DrawBackButton();
-    DrawTextAt(L"键盘 · EWEADN X87", g.fmtHead,
-               D2D1::RectF(S(70), S(20), S(480), S(46)), kText);
+    DrawTextAligned(L"键盘 · EWEADN X87", g.fmtHead, R(L.title), kText, kLeft, kMiddle);
 
     wchar_t status[64];
     if (g.kbConnected) {
@@ -951,7 +1089,7 @@ void OnPaintKbDetail() {
     } else {
         wcscpy_s(status, L"离线");
     }
-    DrawTextAt(status, g.fmtSmall, D2D1::RectF(S(600), S(24), S(736), S(44)), kTextDim);
+    DrawTextAligned(status, g.fmtSmall, R(L.status), kTextDim, kRight, kMiddle);
 
     std::vector<std::wstring> modeLabels;
     for (int i = 0; i < kLedModeCount; ++i) modeLabels.emplace_back(kLedModeNames[i]);
@@ -967,13 +1105,18 @@ void OnPaintKbDetail() {
     DrawWheel(g_brightWheel, numLabels, L"亮度");
     DrawWheel(g_speedWheel, numLabels, L"速度");
 
-    DrawTextAt(L"上下滚动选择　·　松开后自动应用", g.fmtSmall,
-               D2D1::RectF(S(24), S(308), S(736), S(328)), kTextDim);
+    DrawTextAligned(L"上下滚动选择　·　松开后自动应用", g.fmtSmall,
+                    R(L.foot), kTextDim, kCenter, kMiddle);
 }
 
 void OnPaint() {
-    if (g.fmtHead == nullptr) CreateTextFormats();
     if (!CreateDeviceResources()) return;
+    UpdateScale();
+    // 缩放变化时字号必须同步重建，否则文字大小与卡片/滚轮脱节
+    if (g.fmtHead == nullptr || std::fabs(g.fontScale - g.scale) > 0.001f) {
+        CreateTextFormats();
+        g.fontScale = g.scale;
+    }
 
     g.rt->BeginDraw();
     g.rt->Clear(kBg);
@@ -1066,32 +1209,22 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE:
             g.panel = hwnd;
+            InitLayout();
+            SyncWheels();
+            SyncKbWheels();
             return 0;
 
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd, &ps);
 
-            // 首次绘制时窗口已完成显示器关联，此时 DPI 才可信
-            if (!g.sizeAdjusted) {
-                g.sizeAdjusted = true;
-                UINT dpi = GetDpiForWindow(hwnd);
-                if (dpi > 0) g.dpi = dpi;
-                const int wantW = MulDiv(g.winW, static_cast<int>(g.dpi), 96);
-                const int wantH = MulDiv(g.winH, static_cast<int>(g.dpi), 96);
-                RECT cur{};
-                GetWindowRect(hwnd, &cur);
-                if ((cur.right - cur.left) != wantW || (cur.bottom - cur.top) != wantH) {
-                    RECT work{};
-                    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-                    SetWindowPos(hwnd, nullptr,
-                                 work.left + ((work.right - work.left) - wantW) / 2,
-                                 work.top + ((work.bottom - work.top) - wantH) / 2,
-                                 wantW, wantH, SWP_NOZORDER | SWP_NOACTIVATE);
-                    EndPaint(hwnd, &ps);
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                    return 0;
-                }
+            // DPI 变化时字号与 render target 需要重建；缩放本身由 OnPaint
+            // 按实际客户区尺寸推导，与 DPI 感知模式无关。
+            const UINT dpi = GetDpiForWindow(hwnd);
+            if (dpi > 0 && dpi != g.dpi) {
+                g.dpi = dpi;
+                g.fontScale = 0.0f;
+                DiscardDeviceResources();
             }
 
             OnPaint();
@@ -1112,21 +1245,16 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_DPICHANGED: {
             g.dpi = HIWORD(wp);
-            // 字号依赖 DPI，置空后下一帧重建
-            auto drop = [](IDWriteTextFormat*& f) {
-                if (f != nullptr) { f->Release(); f = nullptr; }
-            };
-            drop(g.fmtHead);
-            drop(g.fmtTitle);
-            drop(g.fmtValue);
-            drop(g.fmtSmall);
-            drop(g.fmtWheelBig);
-            drop(g.fmtWheelMid);
-            drop(g.fmtWheelSmall);
+            if (g.dpi == 0) g.dpi = 96;
+            g.fontScale = 0.0f;  // 下一帧按新 scale 重建字号
             DiscardDeviceResources();
+
+            // 系统建议矩形只取左上角位置，宽高按逻辑画布 × 新 DPI 重算，
+            // 保证换到不同缩放的显示器后窗口大小一致。
             const RECT* prc = reinterpret_cast<const RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, prc->left, prc->top,
-                         prc->right - prc->left, prc->bottom - prc->top,
+            const int wantW = static_cast<int>(std::lround(kCanvasW * g.dpi / 96.0f));
+            const int wantH = static_cast<int>(std::lround(kCanvasH * g.dpi / 96.0f));
+            SetWindowPos(hwnd, nullptr, prc->left, prc->top, wantW, wantH,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -1138,14 +1266,10 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_NCHITTEST: {
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
-            // 顶部 56px 可拖动；右上角关闭按钮与详情页返回按钮除外
+            // 顶部 56px 可拖动；关闭按钮与详情页返回按钮除外
             if (pt.y < static_cast<LONG>(S(56))) {
-                if (pt.x > static_cast<LONG>(S(700))) return HTCLIENT;
-                if (g_view != ViewMode::Main &&
-                    pt.x >= static_cast<LONG>(S(20)) && pt.x <= static_cast<LONG>(S(60)) &&
-                    pt.y >= static_cast<LONG>(S(12)) && pt.y <= static_cast<LONG>(S(52))) {
-                    return HTCLIENT;   // 返回按钮区域不当作标题栏
-                }
+                if (g_view == ViewMode::Main && Hit(pt, L.closeHit)) return HTCLIENT;
+                if (g_view != ViewMode::Main && Hit(pt, L.backHit)) return HTCLIENT;
                 return HTCAPTION;
             }
             return HTCLIENT;
@@ -1156,16 +1280,14 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_view == ViewMode::Main) return 0;
 
             // 返回按钮
-            if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(56)) &&
-                pt.y >= static_cast<LONG>(S(16)) && pt.y <= static_cast<LONG>(S(48))) {
+            if (Hit(pt, L.backHit)) {
                 g_view = ViewMode::Main;
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
             // 命中滚轮：记录拖动起点，并直接定位到点击处最近的一档
             auto tryHit = [&](Wheel& w, int id) -> bool {
-                if (pt.x < static_cast<LONG>(S(w.x)) || pt.x > static_cast<LONG>(S(w.x + w.w))) return false;
-                if (pt.y < static_cast<LONG>(S(w.y)) || pt.y > static_cast<LONG>(S(w.y + w.h))) return false;
+                if (!HitWheel(pt, w)) return false;
 
                 g_dragWheel = id;
                 g_dragStartY = pt.y;
@@ -1182,15 +1304,9 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 return true;
             };
             if (g_view == ViewMode::MouseDetail) {
-                // 增删 DPI 档位
-                const bool inPlus = pt.x >= static_cast<LONG>(S(120)) &&
-                                    pt.x <= static_cast<LONG>(S(200)) &&
-                                    pt.y >= static_cast<LONG>(S(280)) &&
-                                    pt.y <= static_cast<LONG>(S(330));
-                const bool inMinus = pt.x >= static_cast<LONG>(S(200)) &&
-                                     pt.x <= static_cast<LONG>(S(280)) &&
-                                     pt.y >= static_cast<LONG>(S(280)) &&
-                                     pt.y <= static_cast<LONG>(S(330));
+                // 增删 DPI 档位：命中区与绘制矩形完全一致
+                const bool inPlus = Hit(pt, L.plusBtn);
+                const bool inMinus = Hit(pt, L.minusBtn);
                 if (inPlus || inMinus) {
                     if (!g.mouseCfg.ok) return 0;
                     int count = g.mouseCfg.dpiCount;
@@ -1266,38 +1382,34 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             if (g_view == ViewMode::Main) {
-                if (pt.x > static_cast<LONG>(S(700)) && pt.y < static_cast<LONG>(S(56))) {
+                if (Hit(pt, L.closeHit)) {
                     HidePanel();
                     return 0;
                 }
                 // 开机自启勾选
-                if (pt.x >= static_cast<LONG>(S(20)) && pt.x <= static_cast<LONG>(S(150)) &&
-                    pt.y >= static_cast<LONG>(S(282)) && pt.y <= static_cast<LONG>(S(312))) {
+                if (Hit(pt, L.autostartHit)) {
                     g.autostart = !g.autostart;
                     ApplyAutoStart(g.autostart);
                     SaveConfig();
                     InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
-                if (pt.y >= static_cast<LONG>(S(64)) && pt.y <= static_cast<LONG>(S(264))) {
-                    if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(374))) {
-                        SyncWheels();
-                        g_view = ViewMode::MouseDetail;
-                        InvalidateRect(hwnd, nullptr, FALSE);
-                        return 0;
-                    }
-                    if (pt.x >= static_cast<LONG>(S(386)) && pt.x <= static_cast<LONG>(S(736))) {
-                        SyncKbWheels();
-                        g_view = ViewMode::KbDetail;
-                        InvalidateRect(hwnd, nullptr, FALSE);
-                        return 0;
-                    }
+                if (Hit(pt, L.mouseCard)) {
+                    SyncWheels();
+                    g_view = ViewMode::MouseDetail;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+                if (Hit(pt, L.kbCard)) {
+                    SyncKbWheels();
+                    g_view = ViewMode::KbDetail;
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
                 }
                 return 0;
             }
 
-            if (pt.x >= static_cast<LONG>(S(24)) && pt.x <= static_cast<LONG>(S(56)) &&
-                pt.y >= static_cast<LONG>(S(16)) && pt.y <= static_cast<LONG>(S(48))) {
+            if (Hit(pt, L.backHit)) {
                 g_view = ViewMode::Main;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -1315,37 +1427,16 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             const bool mousePage = (g_view == ViewMode::MouseDetail);
             const bool kbPage = (g_view == ViewMode::KbDetail);
 
-            if (mousePage &&
-                pt.x >= static_cast<LONG>(S(g_dpiWheel.x)) &&
-                pt.x <= static_cast<LONG>(S(g_dpiWheel.x + g_dpiWheel.w)) &&
-                pt.y >= static_cast<LONG>(S(g_dpiWheel.y)) &&
-                pt.y <= static_cast<LONG>(S(g_dpiWheel.y + g_dpiWheel.h))) {
-                w = &g_dpiWheel;
-                which = 0;
-            } else if (mousePage && pt.x >= static_cast<LONG>(S(g_rateWheel.x)) &&
-                       pt.x <= static_cast<LONG>(S(g_rateWheel.x + g_rateWheel.w)) &&
-                       pt.y >= static_cast<LONG>(S(g_rateWheel.y)) &&
-                       pt.y <= static_cast<LONG>(S(g_rateWheel.y + g_rateWheel.h))) {
-                w = &g_rateWheel;
-                which = 1;
-            } else if (kbPage && pt.x >= static_cast<LONG>(S(g_modeWheel.x)) &&
-                       pt.x <= static_cast<LONG>(S(g_modeWheel.x + g_modeWheel.w)) &&
-                       pt.y >= static_cast<LONG>(S(g_modeWheel.y)) &&
-                       pt.y <= static_cast<LONG>(S(g_modeWheel.y + g_modeWheel.h))) {
-                w = &g_modeWheel;
-                which = 2;
-            } else if (kbPage && pt.x >= static_cast<LONG>(S(g_brightWheel.x)) &&
-                       pt.x <= static_cast<LONG>(S(g_brightWheel.x + g_brightWheel.w)) &&
-                       pt.y >= static_cast<LONG>(S(g_brightWheel.y)) &&
-                       pt.y <= static_cast<LONG>(S(g_brightWheel.y + g_brightWheel.h))) {
-                w = &g_brightWheel;
-                which = 3;
-            } else if (kbPage && pt.x >= static_cast<LONG>(S(g_speedWheel.x)) &&
-                       pt.x <= static_cast<LONG>(S(g_speedWheel.x + g_speedWheel.w)) &&
-                       pt.y >= static_cast<LONG>(S(g_speedWheel.y)) &&
-                       pt.y <= static_cast<LONG>(S(g_speedWheel.y + g_speedWheel.h))) {
-                w = &g_speedWheel;
-                which = 4;
+            if (mousePage && HitWheel(pt, g_dpiWheel)) {
+                w = &g_dpiWheel; which = 0;
+            } else if (mousePage && HitWheel(pt, g_rateWheel)) {
+                w = &g_rateWheel; which = 1;
+            } else if (kbPage && HitWheel(pt, g_modeWheel)) {
+                w = &g_modeWheel; which = 2;
+            } else if (kbPage && HitWheel(pt, g_brightWheel)) {
+                w = &g_brightWheel; which = 3;
+            } else if (kbPage && HitWheel(pt, g_speedWheel)) {
+                w = &g_speedWheel; which = 4;
             }
             if (w == nullptr) return 0;
 
@@ -1690,6 +1781,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
 
     g.dpi = GetDpiForWindow(hwnd);
     if (g.dpi == 0) g.dpi = 96;
+    g.scale = static_cast<float>(g.dpi) / 96.0f;
+    g.fontScale = 0.0f;
 
     // PMv2 进程下 GetDeviceCaps 恒为 96，必须在窗口创建后用 GetDpiForWindow 换算物理尺寸
     {
