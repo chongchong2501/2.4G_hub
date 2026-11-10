@@ -46,7 +46,6 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")
 
-#include <shobjidl.h>
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
@@ -435,14 +434,7 @@ void FixAutoStartPath() {
     if (current != expected) ApplyAutoStart(true);
 }
 
-// ---------- 托盘图标（动态绘制，含电量角标） ----------
-
-D2D1_COLOR_F BatteryColor(int level) {
-    if (level < 0) return D2D1::ColorF(0x6B7076);
-    if (level >= 50) return kOk;
-    if (level >= 20) return kWarn;
-    return kBad;
-}
+// ---------- 托盘图标（双同心圆，按电量上色） ----------
 
 // 双环托盘图标：外环 = 键盘电量，内环 = 鼠标电量
 HICON MakeTrayIcon(int mouseLevel, int kbLevel) {
@@ -564,108 +556,6 @@ HICON MakeTrayIcon(int mouseLevel, int kbLevel) {
     DeleteObject(color);
     DeleteObject(mask);
     return icon;
-}
-
-// ---------- 任务栏（缩略图角标 + 悬停提示） ----------
-
-ITaskbarList3* g_taskbar = nullptr;
-
-bool InitTaskbar() {
-    if (g_taskbar != nullptr) return true;
-    if (FAILED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&g_taskbar)))) {
-        g_taskbar = nullptr;
-        return false;
-    }
-    if (FAILED(g_taskbar->HrInit())) {
-        g_taskbar->Release();
-        g_taskbar = nullptr;
-        return false;
-    }
-    return true;
-}
-
-// 16×16 实心圆角标，颜色按电量分档
-HICON MakeBadgeIcon(int level) {
-    const int size = 16;
-    BITMAPV5HEADER bi{};
-    bi.bV5Size = sizeof(bi);
-    bi.bV5Width = size;
-    bi.bV5Height = -size;
-    bi.bV5Planes = 1;
-    bi.bV5BitCount = 32;
-    bi.bV5Compression = BI_BITFIELDS;
-    bi.bV5RedMask = 0x00FF0000;
-    bi.bV5GreenMask = 0x0000FF00;
-    bi.bV5BlueMask = 0x000000FF;
-    bi.bV5AlphaMask = 0xFF000000;
-
-    void* bits = nullptr;
-    HDC dc = CreateCompatibleDC(nullptr);
-    HBITMAP bmp = CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS,
-                                   &bits, nullptr, 0);
-    if (bmp == nullptr || bits == nullptr) {
-        if (bmp) DeleteObject(bmp);
-        DeleteDC(dc);
-        return nullptr;
-    }
-    SelectObject(dc, bmp);
-
-    DWORD color = 0x00639922;                      // 绿
-    if (level < 20) color = 0x004A4BE2;            // 红（BGR）
-    else if (level < 50) color = 0x00279FEF;       // 琥珀（BGR）
-
-    auto* px = static_cast<uint32_t*>(bits);
-    const float c = (size - 1) / 2.0f;
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const float dx = x - c;
-            const float dy = y - c;
-            const float dist = std::sqrt(dx * dx + dy * dy);
-            // 边缘 1px 做线性渐变，避免 16×16 下出现八边形锯齿
-            float alpha = c - dist + 0.5f;
-            if (alpha <= 0.0f) { px[y * size + x] = 0u; continue; }
-            if (alpha > 1.0f) alpha = 1.0f;
-            px[y * size + x] = (static_cast<uint32_t>(alpha * 255.0f) << 24) | color;
-        }
-    }
-
-    SelectObject(dc, GetStockObject(NULL_BRUSH));
-    DeleteDC(dc);
-
-    HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
-    ICONINFO ii{};
-    ii.fIcon = TRUE;
-    ii.hbmColor = bmp;
-    ii.hbmMask = mask;
-    HICON icon = CreateIconIndirect(&ii);
-
-    DeleteObject(bmp);
-    DeleteObject(mask);
-    return icon;
-}
-
-void UpdateTaskbar() {
-    if (g.panel == nullptr || !InitTaskbar()) return;
-
-    const int mouseLevel = g.mouseConnected ? g.mouseBattery : -1;
-    const int kbLevel = g.kbConnected ? g.kbBattery : -1;
-    int worst = -1;
-    if (mouseLevel >= 0 && kbLevel >= 0) worst = (mouseLevel < kbLevel) ? mouseLevel : kbLevel;
-    else if (mouseLevel >= 0) worst = mouseLevel;
-    else if (kbLevel >= 0) worst = kbLevel;
-
-    wchar_t tip[160];
-    if (worst < 0) {
-        wcscpy_s(tip, L"MCHOSE Hub · 设备离线");
-    } else {
-        swprintf_s(tip, L"鼠标 %d%%　·　键盘 %d%%", g.mouseBattery, g.kbBattery);
-    }
-    g_taskbar->SetThumbnailTooltip(g.panel, tip);
-
-    HICON badge = (worst >= 0) ? MakeBadgeIcon(worst) : nullptr;
-    g_taskbar->SetOverlayIcon(g.panel, badge, tip);
-    if (badge != nullptr) DestroyIcon(badge);
 }
 
 void UpdateTrayIcon() {
@@ -1607,7 +1497,6 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             UpdateTrayIcon();
-            UpdateTaskbar();
             if (g.panelVisible) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1807,8 +1696,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
 
     g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     AddTrayIcon();
-
-    UpdateTaskbar();  // 建立任务栏角标
 
     g.wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // 自动重置
     g.stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);   // 手动重置
