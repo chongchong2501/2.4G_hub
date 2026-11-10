@@ -19,6 +19,9 @@
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>    // IShellLink / IPersistFile：注册 Toast 用的 AUMID
+#include <propkey.h>     // PKEY_AppUserModel_ID
+#include <propvarutil.h>
 #include <dwmapi.h>
 
 // 必须在 d2d1.h 之前取消宏：否则 ID2D1RenderTarget::DrawText 的声明
@@ -40,11 +43,19 @@
 
 #include "device.h"
 
+// WinRT 投影头放在 GDI/D2D 之后，避免其 ABI 声明与既有头文件互相干扰。
+// 只用到 Xml.Dom 与 Notifications 两个命名空间。
+#include <winrt/base.h>
+#include <winrt/Windows.Data.Xml.Dom.h>
+#include <winrt/Windows.UI.Notifications.h>
+
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "propsys.lib")
+#pragma comment(lib, "windowsapp.lib")
 
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "d2d1.lib")
@@ -130,6 +141,9 @@ struct AppState {
     int winH = static_cast<int>(kCanvasH);
     bool autostart = false;
     int lowBattery = 15;
+    // 低电量提醒去抖：同一阈值只弹一次，电量回升到阈值+5 后复位
+    bool mouseLowNotified = false;
+    bool kbLowNotified = false;
     std::wstring configDir;
     std::wstring configFile;
     bool portable = true;  // false 表示已降级到 LOCALAPPDATA
@@ -610,6 +624,120 @@ void RemoveTrayIcon() {
     nid.hWnd = g.panel;
     nid.uID = 1;
     Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+// ---------- 低电量提醒（Windows 系统通知） ----------
+
+constexpr wchar_t kAumid[] = L"MchoseEweadnHub.Desktop";
+constexpr wchar_t kToastShortcutName[] = L"Mchose EWEADN Hub";
+
+// Toast 在 Win10 1809+ 要求 AUMID 对应一个开始菜单快捷方式，否则通知会被系统丢弃：
+// API 不报错、也不抛异常，但通知中心里什么都没有（实测确认）。
+// 绿色版没有安装程序，所以由程序自己补一个快捷方式；exe 移动后启动时重写校正路径。
+bool EnsureToastShortcut() {
+    PWSTR programs = nullptr;
+    if (FAILED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &programs))) return false;
+    const std::wstring lnk = std::wstring(programs) + L"\\" + kToastShortcutName + L".lnk";
+    CoTaskMemFree(programs);
+
+    IShellLinkW* link = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&link)))) {
+        return false;
+    }
+    link->SetPath(ExePath().c_str());
+    link->SetDescription(L"MCHOSE / EWEADN 设备管理与电量提醒");
+
+    IPropertyStore* store = nullptr;
+    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&store)))) {
+        PROPVARIANT pv;
+        PropVariantInit(&pv);
+        if (SUCCEEDED(InitPropVariantFromString(kAumid, &pv))) {
+            store->SetValue(PKEY_AppUserModel_ID, pv);
+            store->Commit();
+        }
+        PropVariantClear(&pv);
+        store->Release();
+    }
+
+    IPersistFile* file = nullptr;
+    bool ok = false;
+    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+        ok = SUCCEEDED(file->Save(lnk.c_str(), TRUE));
+        file->Release();
+    }
+    link->Release();
+    return ok;
+}
+
+// 真正的 Windows 通知（进通知中心、显示应用名与逐行正文）
+bool ShowToast(const wchar_t* title, const wchar_t* text) {
+    try {
+        namespace wd = winrt::Windows::Data::Xml::Dom;
+        namespace wn = winrt::Windows::UI::Notifications;
+
+        std::wstring xml = L"<toast><visual><binding template=\"ToastGeneric\"><text>";
+        xml += title;
+        xml += L"</text><text>";
+        xml += text;
+        xml += L"</text></binding></visual></toast>";
+
+        wd::XmlDocument doc;
+        doc.LoadXml(xml);
+        wn::ToastNotification notif(doc);
+        wn::ToastNotificationManager::CreateToastNotifier(kAumid).Show(notif);
+        return true;
+    } catch (...) {
+        return false;  // WinRT 不可用 / AUMID 未生效 → 交给兜底
+    }
+}
+
+void ShowSystemNotification(const wchar_t* title, const wchar_t* text) {
+    if (g.panel == nullptr) return;
+    if (ShowToast(title, text)) return;  // 主路径：系统通知
+
+    // 兜底：托盘气泡（老系统或 Toast 不可用）。点击仍会回调 NIN_BALLOONUSERCLICK。
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = g.panel;
+    nid.uID = 1;
+    nid.uFlags = NIF_INFO;  // 只置 NIF_INFO，避免顺带重置托盘图标
+    nid.dwInfoFlags = NIIF_WARNING;
+    nid.uTimeout = 10000;
+    wcsncpy_s(nid.szInfoTitle, title, _TRUNCATE);
+    wcsncpy_s(nid.szInfo, text, _TRUNCATE);
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+// 每轮设备数据更新后调用：跌破阈值提醒一次，回升到阈值+5 复位。
+// 设备离线（电量 -1）时既不复位也不提醒，避免休眠被误判成满电。
+void CheckLowBattery() {
+    const int threshold = (g.lowBattery > 0) ? g.lowBattery : 15;
+    const int resetAt = threshold + 5;
+
+    const bool mouseLow = g.mouseConnected && g.mouseBattery >= 0 &&
+                          g.mouseBattery < threshold && !g.mouseLowNotified;
+    const bool kbLow = g.kbConnected && g.kbBattery >= 0 &&
+                       g.kbBattery < threshold && !g.kbLowNotified;
+
+    if (mouseLow) g.mouseLowNotified = true;
+    if (kbLow) g.kbLowNotified = true;
+
+    wchar_t body[256];
+    if (mouseLow && kbLow) {
+        swprintf_s(body, L"鼠标剩余 %d%%，键盘剩余 %d%%，请及时充电。",
+                   g.mouseBattery, g.kbBattery);
+        ShowSystemNotification(L"鼠标和键盘电量低", body);
+    } else if (mouseLow) {
+        swprintf_s(body, L"MCHOSE A7 Pro 剩余 %d%%，请及时充电。", g.mouseBattery);
+        ShowSystemNotification(L"鼠标电量低", body);
+    } else if (kbLow) {
+        swprintf_s(body, L"EWEADN X87 剩余 %d%%，请及时充电。", g.kbBattery);
+        ShowSystemNotification(L"键盘电量低", body);
+    }
+
+    if (g.mouseConnected && g.mouseBattery >= resetAt) g.mouseLowNotified = false;
+    if (g.kbConnected && g.kbBattery >= resetAt) g.kbLowNotified = false;
 }
 
 // ---------- Direct2D ----------
@@ -1143,6 +1271,9 @@ void OnTrayMessage(LPARAM lp) {
         case WM_RBUTTONUP:
             ShowTrayMenu();
             break;
+        case NIN_BALLOONUSERCLICK:
+            ShowPanel();  // 点低电量通知正文 → 直接打开面板看详情
+            break;
         default:
             break;
     }
@@ -1553,6 +1684,7 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
 
             UpdateTrayIcon();
+            CheckLowBattery();  // 低电量系统通知，同一阈值只弹一次
             if (g.panelVisible) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1662,6 +1794,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     ResolveConfigDir();
     LoadConfig();
     FixAutoStartPath();
+    EnsureToastShortcut();  // 系统通知需要 AUMID：首次运行补开始菜单快捷方式
 
     bool startHidden = wcsstr(cmdLine, L"--tray") != nullptr;
 

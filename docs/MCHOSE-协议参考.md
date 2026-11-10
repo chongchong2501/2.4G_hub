@@ -2,7 +2,7 @@
 
 > 本文件是公开协议文档的原文留档（base64 解码自 Codeberg `fenix0xf/mchose-linux` 的 `PROTOCOL.md`），
 > 正文保持原样、不作改写。本项目当前范围与待做项请以 `README.md`、需求文档 §0 / §11 为准：
-> 2026-11-10 范围收敛后仅剩「低电量提醒气泡」一项待做，
+> 2026-11-10 范围收敛后保留的两项功能均已交付，
 > 文中未在本项目实现的功能均属范围外，不代表功能排期。
 
 Recovered from the M HUB web driver bundle (`mchose.com.cn`, chunk

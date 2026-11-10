@@ -32,13 +32,12 @@
 | P5 | 完整调试版 | ❌ 已确认不做（范围收敛） |
 | — | 改键、Y 轴独立 DPI、灯效颜色、设备信息、键盘回报率、热插拔、共存检测、逐键灯效等 | ❌ 已确认不做（范围收敛） |
 
-### 仅剩一项待做
+### 待做项
 
-| 项目 | 现状 |
-|---|---|
-| 低电量提醒气泡 | `lowBattery` 阈值已存入配置、托盘圆环会随电量变色，但尚无 `NIF_INFO` 气泡提醒与同阈值去抖 |
+**无。** 2026-11-10 范围收敛后保留的两项（恢复出厂设置、低电量提醒）均已交付。
 
-> 2026-11-10 范围收敛：除上述一项外，早期设计稿列出的其余功能一律不做。需求文档 §0–§5 保留作决策溯源，当前口径以本表与需求文档 §11 / §13 为准。
+> 早期设计稿列出的其余功能一律不做，需求文档 §0–§5 保留作决策溯源，
+> 当前口径以 §0 / §11 / §13 / §14 为准。
 
 ---
 
@@ -49,6 +48,7 @@
 - **鼠标设置**：二级页时钟式滚轮切换 DPI 与回报率（A7 Pro 1K 款只列 125 / 500 / 1000 Hz），停下 400 ms 后写设备；支持增减 DPI 档位、输入数值、自动排序（真键盘输入已复核通过）
 - **键盘灯效**：二级页滚轮切换 21 种灯效模式（含关闭灯效，设备值 `mode=0`）、亮度、速度（`cmd 35` 写入）；关闭灯效已目视确认灭灯
 - **恢复出厂设置**：主面板右下角入口，二次确认后把鼠标 DPI 六档恢复为 400 / 800 / 1600 / 3200 / 6400 / 26000（活动档 800）、键盘灯效恢复为静态恒亮白色（亮度 5、速度 5）；不触碰按键映射、宏等本工具未修改的字段
+- **低电量提醒**：电量跌破阈值（默认 15%，`settings.json` 的 `lowBattery`）时发 Windows 系统通知（WinRT Toast，进通知中心），标题与正文直接写明是鼠标还是键盘、剩余多少；同一阈值只提醒一次，电量回升到阈值+5 后复位
 - **配置备份**：首次写入前自动保存 `config\backup.mouse.bin`，写入失败自动回滚
 - **便携存储**：配置写在 exe 同目录 `config\`，目录只读时自动降级到 `%LOCALAPPDATA%`
 - **开机自启**：面板勾选框写 `HKCU\...\Run`，exe 移动后自动校正路径
@@ -71,15 +71,18 @@
 
 ```bat
 cl /std:c++17 /utf-8 /EHsc /MT /O2 /W4 /DUNICODE /D_UNICODE ^
+   /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS ^
+   /I "%WindowsSdkDir%Include\%WindowsSDKVersion%cppwinrt" ^
    src\hub.cpp src\device.cpp ^
    /Fe:bin\MchoseEweadnHub.exe ^
-   /link user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib ^
-   dwmapi.lib d2d1.lib dwrite.lib setupapi.lib hid.lib ^
+   /link user32.lib gdi32.lib shell32.lib advapi32.lib ole32.lib propsys.lib ^
+   windowsapp.lib dwmapi.lib d2d1.lib dwrite.lib setupapi.lib hid.lib ^
    /MANIFEST:EMBED /MANIFESTINPUT:src\hub.manifest
 ```
 
 `/MT` 必须保留——用 `/MD` 会依赖 VC++ 运行库，就不是"单 exe 绿色版"了。
 `/utf-8` 与 `hub.manifest` 也不能省：前者保证中文字符串正确，后者声明 Per-Monitor V2 DPI，否则界面会被系统按 96 DPI 虚拟化。
+`cppwinrt` 头与 `windowsapp.lib`、`propsys.lib` 是系统通知（WinRT Toast）与 AUMID 注册需要的，均随 Windows SDK 提供，不属于第三方依赖。
 
 ---
 
@@ -118,6 +121,8 @@ bin/    构建输出（不纳入版本库）
 - `0x12 0x67` 长报告通道会偶发卡死（返回全 0），需用 `0x11 0x58` 重选 profile 恢复
 - 写入前必须先成功读取整包，否则会把空数据当成原值写回设备
 - **单文件指「单 exe 交付」**：首次运行仍会在 exe 同目录生成 `config\`（`settings.json` 与 `backup.mouse.bin`）；目录只读时自动降级到 `%LOCALAPPDATA%`。此为定稿行为，不再改为纯内存
+- **系统通知需要 AUMID**：Win10 1809+ 的 Toast 必须对应一个开始菜单快捷方式，否则通知会被系统静默丢弃（`Show()` 不报错、通知中心里也没有）。程序首次运行会在开始菜单创建 `Mchose EWEADN Hub.lnk` 并写入 AUMID，exe 移动后启动时重写校正。这是绿色免安装下使用系统通知的必要代价
+- **「请勿打扰」会拦截通知**：系统开启专注/勿扰时不弹横幅，这是系统行为，与本程序无关
 - Win11 可能把托盘图标收进 `^` 展开区，需手动拖出才能常驻可见
 - 用外部脚本 `PrintWindow` 抓界面截图时，脚本进程必须先声明 DPI 感知（`SetProcessDpiAwareness(2)`），否则会把 1140×540 的窗口读成 760×360、只抓到左上角，看起来像「界面被放大裁切」
 
