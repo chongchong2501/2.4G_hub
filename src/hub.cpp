@@ -374,26 +374,59 @@ HICON MakeTrayIcon(int mouseLevel, int kbLevel) {
     const float kTwoPi = 6.28318531f;
     const float rOut = 13.5f, thOut = 3.6f;   // 外环（键盘）
     const float rIn = 7.5f, thIn = 3.6f;      // 内环（鼠标）
-    const uint8_t dimR = 0x3F, dimG = 0x41, dimB = 0x45;  // 未填充的暗灰
+    const uint8_t dimR = 0x3F, dimG = 0x41, dimB = 0x45;
 
+    // 单个采样点：返回该点的颜色与可见性
+    auto sampleAt = [&](float fx, float fy, int* rr, int* gg, int* bb, int* aa) {
+        const float dx = fx - cx;
+        const float dy = fy - cy;
+        const float dist = std::sqrt(dx * dx + dy * dy);
+
+        float ang = std::atan2(dx, -dy);
+        if (ang < 0.0f) ang += kTwoPi;
+        const float frac = ang / kTwoPi;
+
+        const bool inOut = std::fabs(dist - rOut) <= thOut * 0.5f;
+        const bool inIn = std::fabs(dist - rIn) <= thIn * 0.5f;
+
+        if (inOut) {
+            if (frac <= kbPct / 100.0f) { *rr = kr; *gg = kg; *bb = kb; }
+            else { *rr = dimR; *gg = dimG; *bb = dimB; }
+            *aa = 255;
+            return;
+        }
+        if (inIn) {
+            if (frac <= mousePct / 100.0f) { *rr = mr; *gg = mg; *bb = mb; }
+            else { *rr = dimR; *gg = dimG; *bb = dimB; }
+            *aa = 255;
+            return;
+        }
+        *rr = 0; *gg = 0; *bb = 0; *aa = 0;
+    };
+
+    // 4×4 超采样：先按 4 倍精度判断，再平均回单像素
+    const int kSS = 4;
     for (int y = 0; y < sz; ++y) {
         for (int x = 0; x < sz; ++x) {
-            const float dx = x - cx;
-            const float dy = y - cy;
-            const float dist = std::sqrt(dx * dx + dy * dy);
-
-            // 角度：12 点方向为 0，顺时针增长
-            float ang = std::atan2(dx, -dy);
-            if (ang < 0.0f) ang += kTwoPi;
-            const float frac = ang / kTwoPi;
-
-            if (dist >= rOut - thOut * 0.5f && dist <= rOut + thOut * 0.5f) {
-                if (frac <= kbPct / 100.0f) put(x, y, kr, kg, kb, 0xFF);
-                else put(x, y, dimR, dimG, dimB, 0xFF);
-            } else if (dist >= rIn - thIn * 0.5f && dist <= rIn + thIn * 0.5f) {
-                if (frac <= mousePct / 100.0f) put(x, y, mr, mg, mb, 0xFF);
-                else put(x, y, dimR, dimG, dimB, 0xFF);
+            int sumR = 0, sumG = 0, sumB = 0, sumA = 0;
+            for (int syy = 0; syy < kSS; ++syy) {
+                for (int sxx = 0; sxx < kSS; ++sxx) {
+                    const float fx = static_cast<float>(x) + (sxx + 0.5f) / kSS;
+                    const float fy = static_cast<float>(y) + (syy + 0.5f) / kSS;
+                    int rr, gg, bb, aa;
+                    sampleAt(fx, fy, &rr, &gg, &bb, &aa);
+                    // 先乘 alpha 再累加，避免边缘出现色边
+                    sumR += rr * aa / 255;
+                    sumG += gg * aa / 255;
+                    sumB += bb * aa / 255;
+                    sumA += aa;
+                }
             }
+            const int n = kSS * kSS;
+            const int a = sumA / n;
+            if (a == 0) continue;
+            put(x, y, static_cast<uint8_t>(sumR / n), static_cast<uint8_t>(sumG / n),
+                static_cast<uint8_t>(sumB / n), static_cast<uint8_t>(a));
         }
     }
 
@@ -818,8 +851,17 @@ void OnPaintMain() {
              g.kbBattery, g.kbConnected);
 
     DrawTextAt(L"×", g.fmtHead, D2D1::RectF(S(716), S(18), S(744), S(46)), kTextDim);
+
+    // 开机自启勾选框
+    FillRound(D2D1::RectF(S(24), S(288), S(42), S(306)), 4,
+              g.autostart ? D2D1::ColorF(0.36f, 0.66f, 0.20f) : kCard);
+    if (g.autostart) {
+        DrawTextAt(L"✓", g.fmtSmall, D2D1::RectF(S(24), S(286), S(42), S(308)), kText);
+    }
+    DrawTextAt(L"开机自启", g.fmtSmall, D2D1::RectF(S(48), S(286), S(140), S(308)), kTextDim);
+
     DrawTextAt(L"点击设备卡片进入设置　·　Esc 关闭", g.fmtSmall,
-               D2D1::RectF(S(24), S(296), S(736), S(316)), kTextDim);
+               D2D1::RectF(S(160), S(288), S(736), S(308)), kTextDim);
 }
 
 void OnPaintMouseDetail() {
@@ -1226,6 +1268,15 @@ LRESULT CALLBACK PanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_view == ViewMode::Main) {
                 if (pt.x > static_cast<LONG>(S(700)) && pt.y < static_cast<LONG>(S(56))) {
                     HidePanel();
+                    return 0;
+                }
+                // 开机自启勾选
+                if (pt.x >= static_cast<LONG>(S(20)) && pt.x <= static_cast<LONG>(S(150)) &&
+                    pt.y >= static_cast<LONG>(S(282)) && pt.y <= static_cast<LONG>(S(312))) {
+                    g.autostart = !g.autostart;
+                    ApplyAutoStart(g.autostart);
+                    SaveConfig();
+                    InvalidateRect(hwnd, nullptr, FALSE);
                     return 0;
                 }
                 if (pt.y >= static_cast<LONG>(S(64)) && pt.y <= static_cast<LONG>(S(264))) {
